@@ -1,0 +1,85 @@
+{
+  "stations": [
+    {
+      "id": "vov3",
+      "name": "VOV3 - Âm nhạc & Sự kiện",
+      "description": "Kênh âm nhạc chính của VOV — nhạc trẻ, V-POP, ca nhạc tổng hợp",
+      "category": "nhac-tre",
+      "frequency": "102.7 MHz",
+      "url": "https://str.vov.gov.vn/vovlive/vov3.sdp_aac/playlist.m3u8",
+      "country": "VN",
+      "fallback_urls": [],
+      "tags": ["vpop", "music", "events"],
+      "aliases": ["vov music", "vov am nhac"],
+      "city": "Hanoi",
+      "homepage": "https://vov.vn/"
+    },
+    {
+      "id": "m-radio",
+      "name": "M Radio Giải Trí Việt Nam",
+      "description": "Phát nhạc Việt liên tục — nhạc trẻ, ballad, nhạc xưa",
+      "category": "nhac-tre",
+      "frequency": "Online",
+      "url": "https://stream-37.zeno.fm/4q7y9hvkp2zuv",
+      "country": "VN",
+      "fallback_urls": [],
+      "tags": ["vpop", "music", "chill"],
+      "aliases": ["m radio", "mradio", "nhac viet"],
+      "city": "Online"
+    },
+    {
+      "id": "vov2",
+      "name": "VOV2 - Văn hóa & Xã hội",
+      "description": "Văn hóa, giải trí và âm nhạc Việt Nam",
+      "category": "giai-tri",
+      "frequency": "91.5 MHz",
+      "url": "https://str.vov.gov.vn/vovlive/vov2.sdp_aac/playlist.m3u8",
+      "country": "VN",
+      "fallback_urls": [],
+      "tags": ["culture", "society", "talk"],
+      "aliases": ["vov van hoa", "vov xa hoi"],
+      "city": "Hanoi",
+      "homepage": "https://vov2.vov.vn/"
+    },
+    {
+      "id": "vov5",
+      "name": "VOV5 - Phát thanh đối ngoại",
+      "description": "Tin tức và chương trình tiếng Việt cho người Việt ở nước ngoài",
+      "category": "giai-tri",
+      "frequency": "105.5 MHz",
+      "url": "https://str.vov.gov.vn/vovlive/vov5.sdp_aac/playlist.m3u8",
+      "country": "VN",
+      "fallback_urls": [],
+      "tags": ["news", "overseas", "talk"],
+      "aliases": ["vov doi ngoai", "vov vietnamese"],
+      "city": "Hanoi",
+      "homepage": "https://vovworld.vn/"
+    },
+    {
+      "id": "vov-gt-hn",
+      "name": "VOV Giao Thông Hà Nội",
+      "description": "Thông tin giao thông Hà Nội kèm nhạc nền",
+      "category": "giao-thong",
+      "frequency": "91.0 MHz",
+      "url": "https://str.vov.gov.vn/vovlive/vovGTHN.sdp_aac/playlist.m3u8",
+      "country": "VN",
+      "fallback_urls": [],
+      "tags": ["traffic", "news", "hanoi"],
+      "aliases": ["giao thong ha noi", "vov giao thong hn", "traffic hanoi"],
+      "city": "Hanoi"
+    },
+    {
+      "id": "vov-gt-hcm",
+      "name": "VOV Giao Thông TP.HCM",
+      "description": "Thông tin giao thông Sài Gòn kèm nhạc nền",
+      "category": "giao-thong",
+      "frequency": "99.9 MHz",
+      "url": "https://str.vov.gov.vn/vovlive/vovGTHCM.sdp_aac/playlist.m3u8",
+      "country": "VN",
+      "fallback_urls": [],
+      "tags": ["traffic", "news", "saigon", "hcmc"],
+      "aliases": ["giao thong hcm", "giao thong sai gon", "vov giao thong hcm", "traffic hcmc"],
+      "city": "Ho Chi Minh City"
+    }
+  ]
+}

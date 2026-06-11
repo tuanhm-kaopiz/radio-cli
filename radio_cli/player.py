@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import signal
@@ -24,6 +25,7 @@ from radio_cli.config import (
 from radio_cli.ytdlp_util import YtdlpError, is_youtube_url, resolve_stream_url
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class PlayerError(Exception):
@@ -210,47 +212,81 @@ def play(
     station_id: str | None = None,
     background: bool = False,
     quiet: bool = True,
+    fallback_urls: list[str] | None = None,
 ) -> None:
     """Phát audio. Foreground chặn terminal; background detach process."""
     stop()
 
-    play_url = url
-    if is_youtube_url(url):
+    candidate_urls = [url]
+    for fallback_url in fallback_urls or []:
+        if fallback_url and fallback_url not in candidate_urls:
+            candidate_urls.append(fallback_url)
+
+    last_error: PlayerError | None = None
+    for index, candidate_url in enumerate(candidate_urls):
+        try:
+            _play_candidate(
+                candidate_url,
+                original_url=url,
+                title=title,
+                source=source,
+                station_id=station_id,
+                background=background,
+                quiet=quiet,
+            )
+            return
+        except PlayerError as exc:
+            last_error = exc
+            logger.debug("Playback candidate failed: %s", candidate_url, exc_info=True)
+            if index + 1 < len(candidate_urls):
+                if not quiet:
+                    console.print("[yellow]Stream lỗi, thử fallback tiếp theo...[/yellow]")
+                continue
+            break
+
+    if last_error is not None:
+        if quiet:
+            raise last_error
+        console.print(f"[red]{last_error}[/red]")
+        raise SystemExit(1)
+
+
+def _play_candidate(
+    play_url: str,
+    *,
+    original_url: str,
+    title: str,
+    source: str,
+    station_id: str | None,
+    background: bool,
+    quiet: bool,
+) -> None:
+    if is_youtube_url(play_url):
         try:
             if quiet:
-                play_url = resolve_stream_url(url, quiet=True)
+                play_url = resolve_stream_url(play_url, quiet=True)
             else:
                 with console.status("[bold]Đang lấy stream audio...[/bold]"):
-                    play_url = resolve_stream_url(url)
+                    play_url = resolve_stream_url(play_url)
         except YtdlpError as exc:
-            if quiet:
-                raise PlayerError(str(exc)) from exc
-            raise
+            raise PlayerError(str(exc)) from exc
 
     cmd = _mpv_cmd(play_url, quiet=quiet)
-    state = PlaybackState(title=title, source=source, url=url, station_id=station_id)
+    state = PlaybackState(title=title, source=source, url=original_url, station_id=station_id)
 
     if background:
         ensure_dirs()
         try:
             proc = subprocess.Popen(cmd, **_subprocess_kwargs(background=True))
         except OSError as exc:
-            message = f"Không thể chạy mpv: {exc}"
-            if quiet:
-                raise PlayerError(message) from exc
-            console.print(f"[red]{message}[/red]")
-            raise SystemExit(1) from exc
+            raise PlayerError(f"Không thể chạy mpv: {exc}") from exc
         time.sleep(0.2)
         if proc.poll() is not None:
-            message = "mpv đã dừng ngay sau khi mở. Kiểm tra URL stream hoặc kết nối mạng."
-            if quiet:
-                raise PlayerError(message)
-            console.print(f"[red]{message}[/red]")
-            raise SystemExit(1)
+            raise PlayerError("mpv đã dừng ngay sau khi mở. Kiểm tra URL stream hoặc kết nối mạng.")
         state.pid = proc.pid
         PID_FILE.write_text(str(proc.pid), encoding="utf-8")
         _write_state(state)
-        history.add(title=title, url=url, source=source, station_id=station_id)
+        history.add(title=title, url=original_url, source=source, station_id=station_id)
         if not quiet:
             console.print(f"[green]▶[/green] Đang phát nền: [bold]{title}[/bold] (pid {proc.pid})")
             console.print(
@@ -261,15 +297,11 @@ def play(
     try:
         proc = subprocess.Popen(cmd)
     except OSError as exc:
-        message = f"Không thể chạy mpv: {exc}"
-        if quiet:
-            raise PlayerError(message) from exc
-        console.print(f"[red]{message}[/red]")
-        raise SystemExit(1) from exc
+        raise PlayerError(f"Không thể chạy mpv: {exc}") from exc
     state.pid = proc.pid
     _write_state(state)
     PID_FILE.write_text(str(proc.pid), encoding="utf-8")
-    history.add(title=title, url=url, source=source, station_id=station_id)
+    history.add(title=title, url=original_url, source=source, station_id=station_id)
 
     try:
         proc.wait()
@@ -284,5 +316,4 @@ def play(
             _clear_state()
 
     if proc.returncode not in (0, -15, 255):
-        console.print("[red]Không thể phát. Kiểm tra kết nối mạng hoặc URL.[/red]")
-        raise SystemExit(1)
+        raise PlayerError("Không thể phát. Kiểm tra kết nối mạng hoặc URL.")

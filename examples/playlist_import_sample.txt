@@ -1,0 +1,23 @@
+# radio-cli — mẫu file import playlist (UTF-8)
+#
+# Mỗi dòng là một link; dòng bắt đầu bằng # được bỏ qua.
+# Hai định dạng hỗ trợ:
+#   1) Tên hiển thị | URL          (khuyến nghị — dễ đọc trong playlist show)
+#   2) URL                         (tên hiển thị mặc định = URL)
+#
+# URL hợp lệ: https:// hoặc http:// — YouTube (watch, youtu.be) hoặc stream trực tiếp.
+#
+# Import vào playlist mới:
+#   radio playlist import "Danh sách yêu thích 1" examples/playlist_import_sample.txt --create
+#
+# Import bổ sung vào playlist đã có (bỏ qua link trùng):
+#   radio playlist import "Nhạc làm việc" my_links.txt
+
+# --- Định dạng: Tên | URL ---
+Sơn Tùng M-TP - Chúng ta của tương lai | https://www.youtube.com/watch?v=abPmZCZZrFA
+Mỹ Tâm - Người hãy quên em đi | https://www.youtube.com/watch?v=LnHg4wbsB9g
+Đen Vâu - Lối nhỏ | https://www.youtube.com/watch?v=8UVNT4wvIGY
+
+# --- Định dạng: chỉ URL ---
+https://www.youtube.com/watch?v=kJQP7kiw5Fk
+https://youtu.be/jfKfPfyJRdk

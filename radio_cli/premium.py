@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 
 from radio_cli import stations
-from radio_cli.config import CONFIG_DIR, DATA_DIR, ensure_dirs
+from radio_cli.config import CONFIG_DIR, DATA_DIR, ensure_dirs, mpv_install_hint
 from radio_cli.ytdlp_util import ytdlp_version
 
 
 @dataclass
 class DoctorCheck:
+    name: str
+    ok: bool
+    detail: str
+
+
+
+
+
+
+@dataclass
+class DoctorFix:
     name: str
     ok: bool
     detail: str
@@ -110,3 +122,32 @@ def run_doctor_checks() -> list[DoctorCheck]:
         checks.append(DoctorCheck(name, ok, detail))
 
     return checks
+
+
+def run_doctor_fixes() -> list[DoctorFix]:
+    fixes: list[DoctorFix] = []
+
+    ensure_dirs()
+    fixes.append(DoctorFix("data/config dirs", True, "Đã đảm bảo thư mục dữ liệu tồn tại."))
+
+    if shutil.which("mpv"):
+        fixes.append(DoctorFix("mpv", True, "mpv đã có trên PATH."))
+    else:
+        fixes.append(DoctorFix("mpv", False, mpv_install_hint()))
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        fixes.append(DoctorFix("yt-dlp", False, f"Không thể cập nhật yt-dlp: {exc}"))
+    else:
+        detail = (proc.stdout or proc.stderr or "").strip().splitlines()
+        last_line = detail[-1] if detail else "pip không trả output."
+        fixes.append(DoctorFix("yt-dlp", proc.returncode == 0, last_line))
+
+    return fixes

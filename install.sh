@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="radio-cli"
-DEFAULT_REPO="https://github.com/YOUR_USERNAME/radio-cli.git"
+DEFAULT_REPO="https://github.com/tuanhm-kaopiz/radio-cli.git"
 REPO_URL="${RADIO_CLI_REPO:-$DEFAULT_REPO}"
 BRANCH="${RADIO_CLI_BRANCH:-main}"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -79,7 +79,11 @@ install_system_deps() {
 }
 
 ensure_repo() {
-  [ "$REPO_URL" != "$DEFAULT_REPO" ] || warn "Using placeholder repo URL. Set RADIO_CLI_REPO after publishing the repository."
+  case "$REPO_URL" in
+    *YOUR_USERNAME*)
+      fail "Repo URL chưa được cấu hình. Set RADIO_CLI_REPO=https://github.com/tuanhm-kaopiz/radio-cli.git"
+      ;;
+  esac
 
   mkdir -p "$(dirname "$APP_DIR")"
   if [ -d "$APP_DIR/.git" ]; then

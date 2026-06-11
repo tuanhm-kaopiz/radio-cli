@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from pathlib import Path
 import time
 from typing import Annotated, Any
 
@@ -11,8 +12,10 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-from radio_cli import audio_hub, display, favorites, history, player, premium, queue_store, search, stations
+from radio_cli import audio_hub, data_io, display, favorites, history, player, playlist_store, premium, queue_store, search, stations
 from radio_cli.config import CATEGORIES
+from radio_cli.logging_config import setup_logging
+from radio_cli.station_validation import validate_stations_data
 from radio_cli.player import PlayerError
 from radio_cli.url_utils import UrlValidationError, validate_http_url
 from radio_cli.mpv_ipc import (
@@ -33,10 +36,12 @@ app = typer.Typer(
 fav_app = typer.Typer(help="Quản lý kênh yêu thích.")
 history_app = typer.Typer(help="Lịch sử nghe gần đây.")
 queue_app = typer.Typer(help="Quản lý queue phát nhạc/radio.")
+playlist_app = typer.Typer(help="Quản lý playlist cá nhân.")
 hub_app = typer.Typer(help="Audio Hub: podcast, truyện, broadcast RSS.")
 app.add_typer(fav_app, name="fav")
 app.add_typer(history_app, name="history")
 app.add_typer(queue_app, name="queue")
+app.add_typer(playlist_app, name="playlist")
 app.add_typer(hub_app, name="hub")
 
 console = Console()
@@ -65,6 +70,7 @@ def _play_station(station: dict[str, Any], *, background: bool) -> None:
         source="station",
         station_id=station["id"],
         background=background,
+        fallback_urls=stations.stream_urls(station)[1:],
     )
 
 
@@ -104,6 +110,57 @@ def _play_queue_item(item: dict[str, Any], *, background: bool, subtitle: str = 
         title=item["title"],
         source=item.get("source", "url"),
         station_id=item.get("station_id"),
+        background=background,
+        quiet=not background,
+    )
+
+
+
+def _playlist_or_exit(name_or_id: str) -> dict[str, Any]:
+    playlist = playlist_store.get(name_or_id)
+    if playlist is None:
+        console.print(f"[red]Không tìm thấy playlist:[/red] {name_or_id}")
+        raise typer.Exit(1)
+    return playlist
+
+
+def _show_playlist_table(items: list[dict[str, Any]], *, title: str) -> None:
+    table = Table(title=title, show_lines=True)
+    table.add_column("#", justify="right", width=4)
+    table.add_column("Tên", style="bold")
+    table.add_column("Nguồn", width=10)
+    table.add_column("URL", overflow="fold")
+    for index, item in enumerate(items, 1):
+        table.add_row(str(index), item.get("title", ""), item.get("source", "url"), item.get("url", ""))
+    console.print(table)
+
+
+def _play_playlist_items(
+    playlist: dict[str, Any],
+    *,
+    background: bool,
+    shuffle_items: bool = False,
+    replace_queue: bool = False,
+) -> None:
+    items = list(playlist.get("items", []))
+    if not items:
+        console.print(f"[yellow]Playlist trống:[/yellow] {playlist['name']}")
+        raise typer.Exit(1)
+    if shuffle_items:
+        random.shuffle(items)
+    if replace_queue:
+        queue_store.clear()
+    for item in items[1:]:
+        queue_store.add_item(
+            queue_store.make_item(title=item["title"], url=item["url"], source=item.get("source", "url")),
+            allow_duplicate=False,
+        )
+    first = items[0]
+    display.show_playback_panel(first["title"], subtitle=f"Playlist · {playlist['name']}", background=background)
+    _run_player_or_exit(
+        first["url"],
+        title=first["title"],
+        source=first.get("source", "playlist"),
         background=background,
         quiet=not background,
     )
@@ -267,8 +324,21 @@ def sleep_cmd(
 
 
 @app.command("doctor")
-def doctor_cmd() -> None:
+def doctor_cmd(
+    fix: Annotated[bool, typer.Option("--fix", help="Thử sửa các lỗi môi trường an toàn")] = False,
+) -> None:
     """Kiểm tra môi trường, dependency và dữ liệu local."""
+    if fix:
+        fixes = premium.run_doctor_fixes()
+        fix_table = Table(title="Radio CLI Doctor Fix", show_lines=True)
+        fix_table.add_column("Fix", style="bold")
+        fix_table.add_column("Status", width=8)
+        fix_table.add_column("Detail")
+        for item in fixes:
+            status = "[green]OK[/green]" if item.ok else "[yellow]MANUAL[/yellow]"
+            fix_table.add_row(item.name, status, item.detail)
+        console.print(fix_table)
+
     checks = premium.run_doctor_checks()
     table = Table(title="Radio CLI Doctor", show_lines=True)
     table.add_column("Check", style="bold")
@@ -282,6 +352,53 @@ def doctor_cmd() -> None:
     console.print(table)
     if not all(check.ok for check in checks):
         raise typer.Exit(1)
+
+
+@app.command("validate-stations")
+def validate_stations_cmd() -> None:
+    """Kiểm tra schema và URL trong danh sách kênh đóng gói."""
+    issues = validate_stations_data()
+    table = Table(title="Station Validation", show_lines=True)
+    table.add_column("Level", width=8)
+    table.add_column("Station", style="cyan")
+    table.add_column("Message")
+    for issue in issues:
+        style = "red" if issue.level == "error" else "yellow"
+        table.add_row(f"[{style}]{issue.level.upper()}[/{style}]", issue.station_id, issue.message)
+    if issues:
+        console.print(table)
+    else:
+        console.print("[green]OK[/green] Station data hợp lệ.")
+    if any(issue.level == "error" for issue in issues):
+        raise typer.Exit(1)
+
+
+@app.command("export-data")
+def export_data_cmd(
+    path: Annotated[Path, typer.Argument(help="File JSON backup cần ghi")],
+) -> None:
+    """Export favorites, history, queue và Audio Hub ra JSON."""
+    try:
+        written = data_io.export_data(path)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓[/green] Đã export dữ liệu: [bold]{written}[/bold]")
+
+
+@app.command("import-data")
+def import_data_cmd(
+    path: Annotated[Path, typer.Argument(help="File JSON backup cần import")],
+    merge: Annotated[bool, typer.Option("--merge", help="Merge vào dữ liệu hiện có thay vì ghi đè từng nhóm")] = False,
+) -> None:
+    """Import favorites, history, queue và Audio Hub từ JSON."""
+    try:
+        imported = data_io.import_data(path, merge=merge)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    label = ", ".join(imported) if imported else "không có dữ liệu"
+    console.print(f"[green]✓[/green] Đã import: {label}")
 
 
 @app.command("stop")
@@ -554,6 +671,154 @@ def queue_clear(
         raise typer.Exit(0)
     count = queue_store.clear()
     console.print(f"[dim]Đã xóa {count} mục.[/dim]")
+
+
+@playlist_app.callback(invoke_without_command=True)
+def playlist_list(ctx: typer.Context) -> None:
+    """Hiển thị các playlist cá nhân."""
+    if ctx.invoked_subcommand is not None:
+        return
+    playlists = playlist_store.list_playlists()
+    if not playlists:
+        console.print("[dim]Chưa có playlist.[/dim]")
+        console.print('Tạo nhanh: [bold]radio playlist import "Danh sách yêu thích 1" links.txt --create[/bold]')
+        return
+    table = Table(title="Playlists", show_lines=True)
+    table.add_column("#", justify="right", width=4)
+    table.add_column("ID", style="cyan")
+    table.add_column("Tên", style="bold")
+    table.add_column("Số bài", justify="right")
+    for index, playlist in enumerate(playlists, 1):
+        table.add_row(str(index), playlist.get("id", ""), playlist.get("name", ""), str(len(playlist.get("items", []))))
+    console.print(table)
+
+
+@playlist_app.command("create")
+def playlist_create(
+    name: Annotated[str, typer.Argument(help="Tên playlist")],
+) -> None:
+    """Tạo playlist mới."""
+    try:
+        playlist = playlist_store.create(name)
+    except playlist_store.PlaylistError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]+[/green] {playlist['name']} [dim]({playlist['id']})[/dim]")
+
+
+@playlist_app.command("add")
+def playlist_add(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+    url: Annotated[str, typer.Argument(help="YouTube/stream URL")],
+    title: Annotated[str | None, typer.Option("--title", "-t", help="Tên hiển thị; mặc định là URL")] = None,
+    create_missing: Annotated[bool, typer.Option("--create", help="Tự tạo playlist nếu chưa có")] = False,
+) -> None:
+    """Thêm một link vào playlist."""
+    try:
+        playlist, added = playlist_store.add_item(
+            name,
+            playlist_store.make_item(title=title or url, url=url),
+            create_missing=create_missing,
+        )
+    except (playlist_store.PlaylistError, UrlValidationError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    marker = "[green]+[/green]" if added else "[yellow]=[/yellow]"
+    status = "Đã thêm" if added else "Đã có"
+    console.print(f"{marker} {status} trong [bold]{playlist['name']}[/bold].")
+
+
+@playlist_app.command("import")
+def playlist_import(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+    path: Annotated[Path, typer.Argument(help="File .txt, mỗi dòng là URL hoặc Title | URL")],
+    create_missing: Annotated[bool, typer.Option("--create", help="Tự tạo playlist nếu chưa có")] = False,
+) -> None:
+    """Import nhiều link vào playlist từ file text."""
+    try:
+        added, skipped = playlist_store.import_file(name, path, create_missing=create_missing)
+    except playlist_store.PlaylistError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    playlist = _playlist_or_exit(name)
+    console.print(f"[green]+[/green] {playlist['name']}: thêm {added}, bỏ qua trùng {skipped}.")
+
+
+@playlist_app.command("show")
+def playlist_show(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+) -> None:
+    """Xem nội dung playlist."""
+    playlist = _playlist_or_exit(name)
+    if not playlist.get("items"):
+        console.print(f"[dim]Playlist trống:[/dim] {playlist['name']}")
+        return
+    _show_playlist_table(playlist["items"], title=f"Playlist · {playlist['name']}")
+
+
+@playlist_app.command("play")
+def playlist_play(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+    background: Annotated[bool, typer.Option("--bg", "-b", help="Phát nền")] = False,
+    replace_queue: Annotated[bool, typer.Option("--replace-queue", help="Xóa queue hiện tại trước khi nạp playlist")] = False,
+) -> None:
+    """Phát playlist: bài đầu phát ngay, các bài còn lại vào queue."""
+    playlist = _playlist_or_exit(name)
+    _play_playlist_items(playlist, background=background, replace_queue=replace_queue)
+
+
+@playlist_app.command("shuffle")
+def playlist_shuffle(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+    background: Annotated[bool, typer.Option("--bg", "-b", help="Phát nền")] = False,
+    replace_queue: Annotated[bool, typer.Option("--replace-queue", help="Xóa queue hiện tại trước khi nạp playlist")] = False,
+) -> None:
+    """Trộn playlist rồi phát."""
+    playlist = _playlist_or_exit(name)
+    _play_playlist_items(playlist, background=background, shuffle_items=True, replace_queue=replace_queue)
+
+
+@playlist_app.command("remove")
+def playlist_remove(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+    index: Annotated[int, typer.Argument(help="Số thứ tự bài cần xóa")],
+) -> None:
+    """Xóa một bài khỏi playlist."""
+    removed = playlist_store.remove_item(name, index)
+    if removed is None:
+        console.print(f"[red]Không xóa được mục số {index}.[/red]")
+        raise typer.Exit(1)
+    console.print(f"[dim]Đã xóa:[/dim] {removed['title']}")
+
+
+@playlist_app.command("rename")
+def playlist_rename(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist hiện tại")],
+    new_name: Annotated[str, typer.Argument(help="Tên mới")],
+) -> None:
+    """Đổi tên playlist."""
+    try:
+        playlist = playlist_store.rename(name, new_name)
+    except playlist_store.PlaylistError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[green]✓[/green] Đã đổi tên thành [bold]{playlist['name']}[/bold].")
+
+
+@playlist_app.command("delete")
+def playlist_delete(
+    name: Annotated[str, typer.Argument(help="Tên hoặc ID playlist")],
+    force: Annotated[bool, typer.Option("--yes", "-y", help="Không hỏi xác nhận")] = False,
+) -> None:
+    """Xóa toàn bộ playlist."""
+    playlist = _playlist_or_exit(name)
+    if not force and not typer.confirm(f"Xóa playlist {playlist['name']}?"):
+        raise typer.Exit(0)
+    removed = playlist_store.delete(name)
+    if removed is None:
+        console.print(f"[red]Không tìm thấy playlist:[/red] {name}")
+        raise typer.Exit(1)
+    console.print(f"[dim]Đã xóa playlist:[/dim] {removed['name']}")
 
 
 @hub_app.command("add")
@@ -848,8 +1113,10 @@ def main(
     category: Annotated[
         str | None, typer.Option("--category", "-c", help="Lọc kênh theo thể loại")
     ] = None,
+    verbose: Annotated[bool, typer.Option("--verbose", help="Bật debug logging")] = False,
 ) -> None:
     """Menu tương tác — chọn kênh để nghe."""
+    setup_logging(verbose=verbose)
     if ctx.invoked_subcommand is not None:
         return
 

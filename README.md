@@ -10,6 +10,9 @@ radio play vov3 --bg
 radio search "sơn tùng mtp" --play
 radio queue add vov3 m-radio
 radio next --bg
+radio playlist import "Danh sách yêu thích 1" examples/playlist_import_sample.txt --create
+radio playlist play "Danh sách yêu thích 1" --bg
+radio export-data backup.json
 radio tui
 radio stop
 ```
@@ -95,7 +98,7 @@ brew install git python mpv yt-dlp
 
 ```powershell
 pip install yt-dlp
-git clone https://github.com/YOUR_USERNAME/radio-cli.git
+git clone https://github.com/tuanhm-kaopiz/radio-cli.git
 cd radio-cli
 python -m venv venv
 .\venv\Scripts\activate
@@ -118,8 +121,15 @@ yt-dlp --version
 Chỉ một lệnh duy nhất:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/radio-cli/main/install.sh | bash
+curl -fsSL https://cdn.jsdelivr.net/gh/tuanhm-kaopiz/radio-cli@main/install.sh | bash
 ```
+
+> **Lưu ý:** `raw.githubusercontent.com` đôi khi cache bản `install.sh` cũ sau khi push. Nếu vẫn thấy `YOUR_USERNAME`, dùng lệnh **jsDelivr** ở trên hoặc:
+> ```bash
+> rm -rf ~/.local/share/radio-cli/app
+> curl -fsSL https://raw.githubusercontent.com/tuanhm-kaopiz/radio-cli/main/install.sh | \
+>   RADIO_CLI_REPO=https://github.com/tuanhm-kaopiz/radio-cli.git bash
+> ```
 
 Sau khi cài xong, mở terminal mới hoặc chạy dòng mà installer in ra, rồi dùng ngay:
 
@@ -139,10 +149,10 @@ Installer tự động:
 | Tự cấu hình PATH | Chỉ thêm `~/.local/bin` vào `~/.bashrc` hoặc `~/.zshrc` nếu phải dùng fallback local |
 | Kiểm tra sau cài | Tự chạy `radio doctor` |
 
-Nếu repo chưa đổi URL trong script, dùng một lệnh này sau khi publish:
+Cài từ source local (dev / không qua curl):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/radio-cli/main/install.sh | RADIO_CLI_REPO=https://github.com/YOUR_USERNAME/radio-cli.git bash
+bash "/đường/dẫn/radio-cli/install.sh"
 ```
 
 Nghe thử ngay:
@@ -160,7 +170,7 @@ radio stop
 ### Bước 1 — Clone repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/radio-cli.git
+git clone https://github.com/tuanhm-kaopiz/radio-cli.git
 cd radio-cli
 ```
 
@@ -245,6 +255,14 @@ radio search "<từ khóa>"       Tìm V-Pop
 radio fav add <id>             Thêm kênh yêu thích
 radio fav list                 Xem yêu thích
 radio fav play                 Phát từ yêu thích
+radio playlist                 Danh sách playlist cá nhân
+radio playlist create <tên>    Tạo playlist mới
+radio playlist import <tên> <file.txt> [--create]   Import link từ file text
+radio playlist show <tên>      Xem bài trong playlist
+radio playlist play <tên> [--bg] [--replace-queue]  Phát playlist
+radio playlist shuffle <tên>   Trộn rồi phát
+radio export-data backup.json  Backup toàn bộ dữ liệu (gồm playlist)
+radio import-data backup.json [--merge]  Khôi phục dữ liệu từ backup
 radio random                   Phát ngẫu nhiên một kênh
 radio resume                   Phát lại mục gần nhất
 radio sleep 30m                Hẹn giờ dừng player
@@ -363,6 +381,36 @@ Queue được lưu local trong thư mục dữ liệu người dùng, giống h
 
 ---
 
+### Playlist cá nhân: import/export link YouTube
+
+Playlist là danh sách phát đặt tên và lưu bền vững, khác với queue tạm thời. Dùng khi bạn muốn có các bộ sưu tập như `Danh sách yêu thích 1`, `Nhạc làm việc`, `V-Pop chill`.
+
+```bash
+radio playlist create "Danh sách yêu thích 1"
+radio playlist add "Danh sách yêu thích 1" "https://www.youtube.com/watch?v=..." --title "Tên bài"
+radio playlist import "Danh sách yêu thích 1" examples/playlist_import_sample.txt --create
+radio playlist
+radio playlist show "Danh sách yêu thích 1"
+radio playlist play "Danh sách yêu thích 1" --bg
+radio playlist shuffle "Danh sách yêu thích 1" --bg
+radio playlist remove "Danh sách yêu thích 1" 2
+radio playlist delete "Danh sách yêu thích 1" --yes
+```
+
+File import là text UTF-8, mỗi dòng là một URL hoặc `Tên bài | URL`:
+
+```txt
+# comment sẽ được bỏ qua
+Sơn Tùng M-TP - Chúng ta của tương lai | https://www.youtube.com/watch?v=...
+https://youtu.be/...
+```
+
+Mẫu có sẵn: [`examples/playlist_import_sample.txt`](examples/playlist_import_sample.txt).
+
+Khi chạy `playlist play`, bài đầu tiên phát ngay; các bài còn lại được nạp vào queue để `radio next` hoặc autoplay trong TUI dùng tiếp. Thêm `--replace-queue` nếu muốn xóa queue hiện tại trước khi nạp playlist.
+
+---
+
 ### TUI Player
 
 ```bash
@@ -373,11 +421,12 @@ Phím chính trong TUI:
 
 | Phím | Hành động |
 |---|---|
-| `Tab` / `Shift+Tab` hoặc `l` / `h` | Chuyển panel Stations / Search / Queue / History |
+| `Tab` / `Shift+Tab` hoặc `l` / `h` | Chuyển panel Stations / Search / Queue / Playlists / History |
 | `↑`/`↓` hoặc `k`/`j` | Di chuyển lựa chọn |
 | `/` | Search YouTube trong TUI |
 | `Enter` | Phát mục đang chọn ở nền |
 | `a` | Thêm station hoặc kết quả search đang chọn vào queue, bỏ qua nếu đã có |
+| `p` | Lưu mục đang chọn vào playlist mặc định `Danh sách yêu thích 1` |
 | `d` / `x` / `Delete` | Xóa mục đang chọn khỏi Queue hoặc History |
 | `n` | Phát mục tiếp theo trong queue |
 | `[` / `]` | Tua lùi / tua tới 10 giây |

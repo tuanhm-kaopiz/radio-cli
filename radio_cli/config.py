@@ -35,6 +35,7 @@ IPC_SOCKET = DATA_DIR / "player.sock"  # Unix socket file (Linux/macOS)
 HISTORY_FILE = DATA_DIR / "history.json"
 QUEUE_FILE = DATA_DIR / "queue.json"
 AUDIO_HUB_FILE = DATA_DIR / "audio_hub.json"
+PLAYLISTS_FILE = DATA_DIR / "playlists.json"
 FAVORITES_FILE = CONFIG_DIR / "favorites.json"
 
 CATEGORIES: dict[str, str] = {

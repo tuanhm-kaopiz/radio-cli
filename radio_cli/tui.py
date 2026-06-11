@@ -10,24 +10,27 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import Header, Input, Static
 
-from radio_cli import history, player, queue_store, search as search_module, stations
+from radio_cli import history, player, playlist_store, queue_store, search as search_module, stations
 from radio_cli.search import SearchError
 from radio_cli.ytdlp_util import is_youtube_url
 from radio_cli.config import CATEGORIES
 from radio_cli.mpv_ipc import MpvIpcError, adjust_volume, get_property, get_volume, seek_absolute, seek_relative, toggle_mute, toggle_pause
 
-Pane = Literal["stations", "search", "queue", "history"]
-PANES: list[Pane] = ["stations", "search", "queue", "history"]
+Pane = Literal["stations", "search", "queue", "playlists", "history"]
+PANES: list[Pane] = ["stations", "search", "queue", "playlists", "history"]
 PANE_TITLES: dict[Pane, str] = {
     "stations": "◆ Stations",
     "search": "⌕ YouTube Search",
     "queue": "≡ Queue",
+    "playlists": "▤ Playlists",
     "history": "◷ History",
 }
 SOURCE_ICONS = {
     "station": "◆",
     "search": "⌕",
     "url": "↗",
+    "youtube": "⌕",
+    "playlist": "▤",
     "podcast": "◉",
     "story": "▣",
     "broadcast": "◌",
@@ -73,6 +76,8 @@ class RadioTuiApp(App[None]):
         Binding("/", "focus_search", "Search"),
         Binding("escape", "blur_search", "Cancel search"),
         Binding("a", "add_selected", "Add"),
+        Binding("p", "add_to_playlist", "Playlist"),
+        Binding("e", "rename_selected", "Rename"),
         Binding("d,x,delete,backspace", "delete_selected", "Delete"),
         Binding("n", "play_next", "Next"),
         Binding("[", "seek_backward", "Seek -10s"),
@@ -100,7 +105,7 @@ class RadioTuiApp(App[None]):
         height: 7;
     }
 
-    #search_input {
+    #search_input, #playlist_rename_input {
         height: 3;
     }
 
@@ -108,22 +113,22 @@ class RadioTuiApp(App[None]):
         height: 1fr;
     }
 
-    #top_row, #bottom_row {
+    #top_row, #middle_row, #bottom_row {
         height: 1fr;
     }
 
-    #stations, #search, #queue, #history {
+    #stations, #search, #queue, #playlists, #history {
         width: 1fr;
         height: 100%;
         margin-right: 1;
     }
 
-    #search, #history {
+    #search, #playlists, #history {
         margin-right: 0;
     }
 
     #shortcuts {
-        height: 5;
+        height: 6;
     }
 
     #message {
@@ -140,18 +145,23 @@ class RadioTuiApp(App[None]):
         self._message = "Sẵn sàng. Nhấn / để search YouTube."
         self._last_seen_pid: int | None = None
         self._stop_requested = False
+        self._target_playlist_id: str | None = None
+        self._renaming_playlist_id: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical(id="root"):
             yield Static(id="now")
             yield Input(placeholder="/ search YouTube V-Pop, Enter để tìm", id="search_input", disabled=True)
+            yield Input(placeholder="Đổi tên playlist, Enter để lưu", id="playlist_rename_input", disabled=True)
             with Vertical(id="body"):
                 with Horizontal(id="top_row"):
                     yield Static(id="stations")
                     yield Static(id="search")
-                with Horizontal(id="bottom_row"):
+                with Horizontal(id="middle_row"):
                     yield Static(id="queue")
+                    yield Static(id="playlists")
+                with Horizontal(id="bottom_row"):
                     yield Static(id="history")
             yield Static(id="shortcuts")
             yield Static(id="message")
@@ -166,7 +176,14 @@ class RadioTuiApp(App[None]):
         if pane == "search":
             return self.search_results
         if pane == "queue":
+            if self.active_pane == "playlists":
+                playlist = self._selected_item("playlists")
+                if playlist is not None:
+                    loaded = playlist_store.get(playlist.get("id", "")) or playlist
+                    return list(loaded.get("items", []))
             return queue_store.list_items()
+        if pane == "playlists":
+            return playlist_store.list_playlists()
         return history.list_entries()
 
     def _selected_item(self, pane: Pane | None = None) -> dict[str, Any] | None:
@@ -231,7 +248,7 @@ class RadioTuiApp(App[None]):
         body = (
             "[bold]Điều hướng[/bold]: Tab/l phải  |  Shift+Tab/h trái  |  ↑/↓ hoặc k/j di chuyển  |  / search  |  Esc hủy search\n"
             "[bold]Player[/bold]: Enter phát nền  |  Space pause/resume  |  n next  |  seek -10/+10  |  0 replay  |  m mute\n"
-            "[bold]Queue/History[/bold]: a thêm vào queue  |  d/x/Delete xóa mục đang chọn  |  [bold]Khác[/bold]: r refresh  |  q thoát"
+            "[bold]Queue/Playlist[/bold]: a thêm queue  |  p lưu vào playlist đang chọn  |  e đổi tên playlist  |  d/x/Delete xóa queue/history/playlist  |  [bold]Khác[/bold]: r refresh  |  q thoát"
         )
         return Panel(body, title="⌘ Shortcuts", border_style="magenta")
 
@@ -252,6 +269,8 @@ class RadioTuiApp(App[None]):
                 label = f"◆ {item.get('name', '—')} · {cat}"
             elif pane == "search":
                 label = f"⌕ {item.get('title', '—')} · {item.get('duration', '--:--')}"
+            elif pane == "playlists":
+                label = f"▤ {item.get('name', '—')} · {len(item.get('items', []))} bài"
             else:
                 source = item.get("source", "url")
                 icon = SOURCE_ICONS.get(source, "•")
@@ -290,8 +309,15 @@ class RadioTuiApp(App[None]):
         self.query_one("#search", Static).update(
             self._list_panel("search", PANE_TITLES["search"], self._items_for_pane("search"))
         )
-        self.query_one("#queue", Static).update(
-            self._list_panel("queue", PANE_TITLES["queue"], self._items_for_pane("queue"))
+        queue_items = self._items_for_pane("queue")
+        queue_title = PANE_TITLES["queue"]
+        if self.active_pane == "playlists":
+            playlist = self._selected_item("playlists")
+            if playlist is not None:
+                queue_title = f"▤ {playlist.get('name', '—')} · {len(queue_items)} bài"
+        self.query_one("#queue", Static).update(self._list_panel("queue", queue_title, queue_items))
+        self.query_one("#playlists", Static).update(
+            self._list_panel("playlists", PANE_TITLES["playlists"], self._items_for_pane("playlists"))
         )
         self.query_one("#history", Static).update(
             self._list_panel("history", PANE_TITLES["history"], self._items_for_pane("history"))
@@ -301,21 +327,32 @@ class RadioTuiApp(App[None]):
 
     def action_next_pane(self) -> None:
         self.active_pane = PANES[(PANES.index(self.active_pane) + 1) % len(PANES)]
+        self._sync_target_playlist()
         self.refresh_ui()
 
     def action_previous_pane(self) -> None:
         self.active_pane = PANES[(PANES.index(self.active_pane) - 1) % len(PANES)]
+        self._sync_target_playlist()
         self.refresh_ui()
 
     def action_cursor_up(self) -> None:
         self.cursors[self.active_pane] = max(0, self.cursors[self.active_pane] - 1)
+        self._sync_target_playlist()
         self.refresh_ui()
 
     def action_cursor_down(self) -> None:
         count = len(self._items_for_pane(self.active_pane))
         if count:
             self.cursors[self.active_pane] = min(count - 1, self.cursors[self.active_pane] + 1)
+        self._sync_target_playlist()
         self.refresh_ui()
+
+    def _sync_target_playlist(self) -> None:
+        if self.active_pane != "playlists":
+            return
+        playlist = self._selected_item("playlists")
+        if playlist is not None:
+            self._target_playlist_id = str(playlist.get("id", "")) or None
 
     def action_focus_search(self) -> None:
         search_input = self.query_one("#search_input", Input)
@@ -326,24 +363,55 @@ class RadioTuiApp(App[None]):
 
     def action_blur_search(self) -> None:
         search_input = self.query_one("#search_input", Input)
-        if search_input.disabled:
+        if not search_input.disabled:
+            search_input.value = ""
+            search_input.blur()
+            search_input.disabled = True
+            self._set_message("Đã hủy search.")
             return
-        search_input.value = ""
-        search_input.blur()
-        search_input.disabled = True
-        self._set_message("Đã hủy search.")
+        self._blur_rename_input()
+
+    def _blur_rename_input(self) -> None:
+        rename_input = self.query_one("#playlist_rename_input", Input)
+        if rename_input.disabled:
+            return
+        rename_input.value = ""
+        rename_input.blur()
+        rename_input.disabled = True
+        self._renaming_playlist_id = None
+        self._set_message("Đã hủy đổi tên playlist.")
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        if event.input.id != "search_input":
+        if event.input.id == "search_input":
+            query = event.value.strip()
+            event.input.value = ""
+            event.input.blur()
+            event.input.disabled = True
+            if not query:
+                self._set_message("Search rỗng.")
+                return
+            self._start_search(query)
             return
-        query = event.value.strip()
-        event.input.value = ""
-        event.input.blur()
-        event.input.disabled = True
-        if not query:
-            self._set_message("Search rỗng.")
-            return
-        self._start_search(query)
+        if event.input.id == "playlist_rename_input":
+            new_name = event.value.strip()
+            event.input.value = ""
+            event.input.blur()
+            event.input.disabled = True
+            playlist_id = self._renaming_playlist_id
+            self._renaming_playlist_id = None
+            if not playlist_id:
+                self._set_message("Không có playlist để đổi tên.")
+                return
+            if not new_name:
+                self._set_message("Tên playlist không được rỗng.")
+                return
+            try:
+                playlist = playlist_store.rename(playlist_id, new_name)
+            except Exception as exc:
+                self._set_message(str(exc) or "Không đổi tên được playlist.")
+                return
+            self._target_playlist_id = playlist.get("id")
+            self._set_message(f"Đã đổi tên playlist: {playlist['name']}")
 
     def _start_search(self, query: str) -> None:
         if self._searching:
@@ -440,6 +508,34 @@ class RadioTuiApp(App[None]):
         self._stop_requested = False
         self._set_message(f"{subtitle}: {title}")
 
+    def _play_playlist(self, playlist: dict[str, Any], *, shuffle_items: bool = False) -> None:
+        loaded = playlist_store.get(playlist.get("id", "")) or playlist
+        items = list(loaded.get("items", []))
+        if not items:
+            self._set_message(f"Playlist trống: {loaded.get('name', '—')}")
+            return
+        if shuffle_items:
+            import random
+
+            random.shuffle(items)
+        for item in items[1:]:
+            queue_store.add_item(
+                queue_store.make_item(title=item["title"], url=item["url"], source=item.get("source", "url")),
+                allow_duplicate=False,
+            )
+        self._play_item(items[0], subtitle=f"Playlist · {loaded.get('name', '—')}")
+
+    def _selected_playlist_item(self) -> dict[str, Any] | None:
+        if self.active_pane == "stations":
+            station = self._selected_item("stations")
+            if station is None:
+                return None
+            return {"title": station["name"], "url": station["url"], "source": "station"}
+        selected = self._selected_item()
+        if selected is None or "url" not in selected:
+            return None
+        return {"title": selected.get("title", selected.get("url", "")), "url": selected["url"], "source": selected.get("source", "url")}
+
     def action_play_selected(self) -> None:
         item = self._selected_item()
         if item is None:
@@ -467,6 +563,10 @@ class RadioTuiApp(App[None]):
             self._play_item(queue_item, subtitle="Đang phát từ queue")
             return
 
+        if self.active_pane == "playlists":
+            self._play_playlist(item)
+            return
+
         self._play_item(item, subtitle="Đang phát")
 
     def action_add_selected(self) -> None:
@@ -491,6 +591,44 @@ class RadioTuiApp(App[None]):
             return
         total = queue_store.add_item(item)
         self._set_message(f"Đã thêm queue: {item['title']} ({total} mục)")
+
+    def action_add_to_playlist(self) -> None:
+        if self.active_pane == "playlists":
+            self._set_message("Chọn station/search/queue/history rồi nhấn p để lưu vào playlist đang chọn. Enter để phát playlist.")
+            return
+
+        item = self._selected_playlist_item()
+        if item is None:
+            self._set_message("Chọn station, search, queue hoặc history để lưu playlist.")
+            return
+        target = self._target_playlist_id or "Danh sách yêu thích 1"
+        try:
+            playlist, added = playlist_store.add_item(
+                target,
+                playlist_store.make_item(title=item["title"], url=item["url"]),
+                create_missing=True,
+            )
+        except Exception as exc:
+            self._set_message(str(exc) or "Không lưu được playlist.")
+            return
+        self._target_playlist_id = playlist.get("id")
+        action = "Đã lưu" if added else "Đã có"
+        self._set_message(f"{action} trong {playlist['name']}: {item['title']}")
+
+    def action_rename_selected(self) -> None:
+        if self.active_pane != "playlists":
+            self._set_message("Phím e chỉ đổi tên khi đang ở panel Playlists.")
+            return
+        playlist = self._selected_item("playlists")
+        if playlist is None:
+            self._set_message("Không có playlist để đổi tên.")
+            return
+        rename_input = self.query_one("#playlist_rename_input", Input)
+        rename_input.disabled = False
+        rename_input.value = playlist.get("name", "")
+        rename_input.focus()
+        self._renaming_playlist_id = str(playlist.get("id", ""))
+        self._set_message("Nhập tên mới rồi Enter. Esc để hủy.")
 
     def action_delete_selected(self) -> None:
         if self.active_pane == "queue":
@@ -527,7 +665,28 @@ class RadioTuiApp(App[None]):
             self._set_message(f"Đã xóa khỏi history: {removed['title']}")
             return
 
-        self._set_message("Phím d/x/Delete chỉ xóa mục khi đang ở panel Queue hoặc History.")
+        if self.active_pane == "playlists":
+            playlists = playlist_store.list_playlists()
+            if not playlists:
+                self._set_message("Chưa có playlist.")
+                return
+
+            index = max(0, min(self.cursors["playlists"], len(playlists) - 1))
+            playlist = playlists[index]
+            removed = playlist_store.delete(playlist.get("id", playlist.get("name", "")))
+            if removed is None:
+                self._set_message("Playlist không còn tồn tại.")
+                return
+
+            remaining = playlist_store.list_playlists()
+            self.cursors["playlists"] = max(0, min(index, len(remaining) - 1)) if remaining else 0
+            if self._target_playlist_id == removed.get("id"):
+                self._target_playlist_id = None
+            self._sync_target_playlist()
+            self._set_message(f"Đã xóa playlist: {removed['name']}")
+            return
+
+        self._set_message("Phím d/x/Delete chỉ xóa mục khi đang ở panel Queue, History hoặc Playlists.")
 
     def action_play_next(self) -> None:
         item = queue_store.pop_next()

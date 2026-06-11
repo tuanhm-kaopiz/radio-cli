@@ -105,3 +105,49 @@ def test_player_quiet_background_raises_when_mpv_exits_immediately(monkeypatch):
 
     with pytest.raises(player.PlayerError, match="mpv đã dừng"):
         player.play("https://example.com/a.mp3", title="Song", background=True, quiet=True)
+
+
+def test_player_background_tries_fallback_when_primary_exits(monkeypatch):
+    from radio_cli import player
+
+    calls = []
+
+    class FakeProc:
+        def __init__(self, pid, return_code):
+            self.pid = pid
+            self._return_code = return_code
+
+        def poll(self):
+            return self._return_code
+
+    def fake_popen(cmd, **kwargs):
+        calls.append(cmd[-1])
+        if len(calls) == 1:
+            return FakeProc(1, 1)
+        return FakeProc(2, None)
+
+    monkeypatch.setattr(player, "stop", lambda: None)
+    monkeypatch.setattr(player, "is_youtube_url", lambda url: False)
+    monkeypatch.setattr(player, "_mpv_cmd", lambda url, quiet=True: ["mpv", url])
+    monkeypatch.setattr(player, "ensure_dirs", lambda: None)
+    monkeypatch.setattr(player.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(player.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(player, "_write_state", lambda state: None)
+    monkeypatch.setattr(player, "history", type("H", (), {"add": staticmethod(lambda **kwargs: None)})())
+
+    class _PidFile:
+        def write_text(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(player, "PID_FILE", _PidFile())
+
+    player.play(
+        "https://example.com/primary.m3u8",
+        title="Station",
+        source="station",
+        background=True,
+        quiet=True,
+        fallback_urls=["https://example.com/fallback.m3u8"],
+    )
+
+    assert calls == ["https://example.com/primary.m3u8", "https://example.com/fallback.m3u8"]

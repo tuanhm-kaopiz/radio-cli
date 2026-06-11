@@ -24,7 +24,7 @@ def test_tui_app_initial_state():
     app = RadioTuiApp()
 
     assert app.active_pane == "stations"
-    assert app.cursors == {"stations": 0, "search": 0, "queue": 0, "history": 0}
+    assert app.cursors == {"stations": 0, "search": 0, "queue": 0, "playlists": 0, "history": 0}
 
 
 def test_shortcut_panel_contains_core_keys():
@@ -37,6 +37,8 @@ def test_shortcut_panel_contains_core_keys():
     assert "/ search" in body
     assert "Esc" in body
     assert "d/x/Delete" in body
+    assert "p lưu vào playlist đang chọn" in body
+    assert "e đổi tên playlist" in body
     assert "Space" in body
     assert "q" in body
 
@@ -51,8 +53,11 @@ def test_panel_navigation_actions(monkeypatch):
     app.action_next_pane()
     assert app.active_pane == "queue"
 
+    app.action_next_pane()
+    assert app.active_pane == "playlists"
+
     app.action_previous_pane()
-    assert app.active_pane == "search"
+    assert app.active_pane == "queue"
 
 
 def test_delete_selected_removes_queue_item(monkeypatch):
@@ -279,3 +284,155 @@ def test_autoplay_next_uses_queue_when_track_ends(monkeypatch):
 
     assert played == [("Next Song", "Autoplay")]
     assert app._last_seen_pid is None
+
+
+def test_play_playlist_queues_remaining_items(monkeypatch):
+    app = RadioTuiApp()
+    app.active_pane = "playlists"
+    playlist = {
+        "id": "demo",
+        "name": "Demo",
+        "items": [
+            {"title": "One", "url": "https://example.com/1", "source": "url"},
+            {"title": "Two", "url": "https://example.com/2", "source": "url"},
+        ],
+    }
+    queued = []
+    played = []
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
+    monkeypatch.setattr("radio_cli.tui.playlist_store.get", lambda playlist_id: playlist)
+    monkeypatch.setattr("radio_cli.tui.queue_store.add_item", lambda item, allow_duplicate=False: queued.append(item) or len(queued))
+    monkeypatch.setattr("radio_cli.tui.queue_store.make_item", lambda **kwargs: kwargs)
+    monkeypatch.setattr(app, "_play_item", lambda item, subtitle: played.append((item, subtitle)))
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    app.action_play_selected()
+
+    assert queued == [{"title": "Two", "url": "https://example.com/2", "source": "url"}]
+    assert played == [(playlist["items"][0], "Playlist · Demo")]
+
+
+def test_playlists_pane_previews_tracks_in_queue_panel(monkeypatch):
+    app = RadioTuiApp()
+    playlist = {
+        "id": "demo",
+        "name": "Demo",
+        "items": [
+            {"title": "One", "url": "https://example.com/1", "source": "url"},
+            {"title": "Two", "url": "https://example.com/2", "source": "url"},
+        ],
+    }
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
+    monkeypatch.setattr("radio_cli.tui.playlist_store.get", lambda playlist_id: playlist)
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    app.active_pane = "playlists"
+    items = app._items_for_pane("queue")
+
+    assert [item["title"] for item in items] == ["One", "Two"]
+
+
+def test_delete_selected_removes_playlist(monkeypatch):
+    playlists = [
+        {"id": "a", "name": "A", "items": []},
+        {"id": "b", "name": "B", "items": []},
+    ]
+    deleted = []
+
+    def fake_list_playlists():
+        return list(playlists)
+
+    def fake_delete(name_or_id):
+        for index, playlist in enumerate(playlists):
+            if playlist["id"] == name_or_id:
+                deleted.append(playlists.pop(index))
+                return deleted[-1]
+        return None
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", fake_list_playlists)
+    monkeypatch.setattr("radio_cli.tui.playlist_store.delete", fake_delete)
+
+    app = RadioTuiApp()
+    app.active_pane = "playlists"
+    app.cursors["playlists"] = 1
+    app._target_playlist_id = "b"
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    app.action_delete_selected()
+
+    assert [playlist["name"] for playlist in playlists] == ["A"]
+    assert deleted[0]["name"] == "B"
+    assert app.cursors["playlists"] == 0
+    assert app._target_playlist_id == "a"
+    assert app._message == "Đã xóa playlist: B"
+
+
+def test_rename_selected_updates_playlist_name(monkeypatch):
+    playlist = {"id": "demo", "name": "Old", "items": []}
+    renamed = []
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
+
+    def fake_rename(name_or_id, new_name):
+        renamed.append((name_or_id, new_name))
+        return {"id": "demo", "name": new_name}
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.rename", fake_rename)
+
+    app = RadioTuiApp()
+    app.active_pane = "playlists"
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    class FakeInput:
+        def __init__(self):
+            self.disabled = True
+            self.value = ""
+            self.id = "playlist_rename_input"
+
+        def focus(self):
+            return None
+
+        def blur(self):
+            return None
+
+    fake_input = FakeInput()
+    monkeypatch.setattr(app, "query_one", lambda selector, widget_type: fake_input)
+
+    app.action_rename_selected()
+
+    assert fake_input.disabled is False
+    assert fake_input.value == "Old"
+    assert app._renaming_playlist_id == "demo"
+
+    app._renaming_playlist_id = "demo"
+    app.on_input_submitted(type("Event", (), {"input": fake_input, "value": "New"})())
+
+    assert renamed == [("demo", "New")]
+    assert app._target_playlist_id == "demo"
+    assert app._message == "Đã đổi tên playlist: New"
+
+
+def test_add_search_result_to_default_playlist(monkeypatch):
+    app = RadioTuiApp()
+    app.active_pane = "search"
+    app.search_results = [{"title": "Song", "url": "https://youtube.com/watch?v=1", "source": "search"}]
+    calls = []
+
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+    monkeypatch.setattr(
+        "radio_cli.tui.playlist_store.make_item",
+        lambda title, url: {"title": title, "url": url, "source": "youtube"},
+    )
+
+    def fake_add(name, item, create_missing=False):
+        calls.append((name, item, create_missing))
+        return {"name": name}, True
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.add_item", fake_add)
+
+    app.action_add_to_playlist()
+
+    assert calls == [("Danh sách yêu thích 1", {"title": "Song", "url": "https://youtube.com/watch?v=1", "source": "youtube"}, True)]
+    assert app._message == "Đã lưu trong Danh sách yêu thích 1: Song"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from radio_cli import queue_store
-from radio_cli.tui import RadioTuiApp, _clip, _format_seconds, _progress_bar
+from radio_cli.tui import RadioTuiApp, _clip, _format_seconds, _progress_bar, _scroll_start
 
 
 def test_clip_short_text_is_unchanged():
@@ -18,6 +18,12 @@ def test_format_seconds_and_progress_bar():
     assert _format_seconds(3661) == "1:01:01"
     assert _progress_bar(5, 10, width=10) == "━━━━━─────"
     assert _progress_bar(None, None, width=4) == "────"
+
+
+def test_scroll_start_keeps_selected_item_visible():
+    assert _scroll_start(10, 0, visible_rows=7) == 0
+    assert _scroll_start(10, 6, visible_rows=7) == 0
+    assert _scroll_start(10, 9, visible_rows=7) == 3
 
 
 def test_tui_app_initial_state():
@@ -41,6 +47,51 @@ def test_shortcut_panel_contains_core_keys():
     assert "e đổi tên playlist" in body
     assert "Space" in body
     assert "q" in body
+
+
+def test_space_pause_binding_has_priority():
+    binding = next(binding for binding in RadioTuiApp.BINDINGS if binding.key == "space")
+
+    assert binding.action == "pause"
+    assert binding.priority is True
+
+
+def test_space_key_handler_triggers_pause(monkeypatch):
+    app = RadioTuiApp()
+    calls = []
+    monkeypatch.setattr(app, "action_pause", lambda: calls.append("pause"))
+
+    class FakeKey:
+        key = "space"
+        character = " "
+
+        def prevent_default(self):
+            calls.append("prevent")
+
+        def stop(self):
+            calls.append("stop")
+
+    app.on_key(FakeKey())
+
+    assert calls == ["prevent", "stop", "pause"]
+
+
+def test_list_panel_scrolls_to_selected_queue_item():
+    app = RadioTuiApp()
+    app.active_pane = "queue"
+    app.cursors["queue"] = 9
+    items = [
+        {"title": f"Song {index}", "url": f"https://example.com/{index}", "source": "url"}
+        for index in range(1, 11)
+    ]
+
+    panel = app._list_panel("queue", "Queue", items)
+    body = str(panel.renderable)
+
+    assert "04. ↗ Song 4" in body
+    assert "10. ↗ Song 10" in body
+    assert "01. ↗ Song 1" not in body
+    assert "4-10/10" in str(panel.title)
 
 
 def test_panel_navigation_actions(monkeypatch):

@@ -8,6 +8,7 @@ from typing import Any
 from rich.console import Console
 
 from radio_cli.config import IS_WINDOWS, IPC_SOCKET, mpv_ipc_server
+from radio_cli.player_settings import load_pre_pause_mute, save_pre_pause_mute, save_volume
 from radio_cli.player import get_playback_state
 
 console = Console()
@@ -97,10 +98,21 @@ def set_property(name: str, value: Any) -> None:
 
 def toggle_pause() -> bool:
     """Toggle pause; trả về True nếu đang pause sau lệnh."""
-    resp = send_command("cycle", "pause")
-    if resp.get("error") != "success":
-        raise MpvIpcError("Không thể pause/resume")
-    return bool(get_property("pause"))
+    paused = bool(get_property("pause"))
+    muted = bool(get_property("mute"))
+    if paused and not muted:
+        save_pre_pause_mute(False)
+        set_property("mute", True)
+        return True
+    next_paused = not paused
+    if next_paused:
+        save_pre_pause_mute(muted)
+        set_property("pause", True)
+        set_property("mute", True)
+    else:
+        set_property("pause", False)
+        set_property("mute", load_pre_pause_mute())
+    return next_paused
 
 
 def get_volume() -> float:
@@ -110,7 +122,7 @@ def get_volume() -> float:
 def set_volume(level: float) -> float:
     level = max(0.0, min(100.0, level))
     set_property("volume", level)
-    return level
+    return save_volume(level)
 
 
 def adjust_volume(delta: float) -> float:

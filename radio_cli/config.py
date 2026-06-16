@@ -31,6 +31,7 @@ DATA_DIR = _data_dir()
 CONFIG_DIR = _config_dir()
 PID_FILE = DATA_DIR / "player.pid"
 STATE_FILE = DATA_DIR / "player.state.json"
+PLAYER_SETTINGS_FILE = DATA_DIR / "player.settings.json"
 IPC_SOCKET = DATA_DIR / "player.sock"  # Unix socket file (Linux/macOS)
 HISTORY_FILE = DATA_DIR / "history.json"
 QUEUE_FILE = DATA_DIR / "queue.json"

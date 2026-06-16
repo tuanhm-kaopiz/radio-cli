@@ -5,9 +5,10 @@ from typing import Any, Literal
 
 from rich.panel import Panel
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.events import Key
 from textual.widgets import Header, Input, Static
 
 from radio_cli import history, player, playlist_store, queue_store, search as search_module, stations
@@ -18,6 +19,7 @@ from radio_cli.mpv_ipc import MpvIpcError, adjust_volume, get_property, get_volu
 
 Pane = Literal["stations", "search", "queue", "playlists", "history"]
 PANES: list[Pane] = ["stations", "search", "queue", "playlists", "history"]
+LIST_VISIBLE_ROWS = 7
 PANE_TITLES: dict[Pane, str] = {
     "stations": "◆ Stations",
     "search": "⌕ YouTube Search",
@@ -62,6 +64,13 @@ def _progress_bar(position: float | None, duration: float | None, *, width: int 
     return "━" * filled + "─" * (width - filled)
 
 
+def _scroll_start(total: int, selected: int, visible_rows: int = LIST_VISIBLE_ROWS) -> int:
+    if total <= visible_rows:
+        return 0
+    selected = max(0, min(selected, total - 1))
+    return min(max(0, selected - visible_rows + 1), total - visible_rows)
+
+
 class RadioTuiApp(App[None]):
     """Fullscreen terminal player for radio-cli."""
 
@@ -84,7 +93,7 @@ class RadioTuiApp(App[None]):
         Binding("]", "seek_forward", "Seek +10s"),
         Binding("0", "restart_track", "Restart"),
         Binding("m", "mute", "Mute"),
-        Binding("space", "pause", "Pause"),
+        Binding("space", "pause", "Pause", priority=True),
         Binding("s", "stop", "Stop"),
         Binding("+", "volume_up", "Vol+"),
         Binding("-", "volume_down", "Vol-"),
@@ -147,6 +156,27 @@ class RadioTuiApp(App[None]):
         self._stop_requested = False
         self._target_playlist_id: str | None = None
         self._renaming_playlist_id: str | None = None
+
+    def _text_input_active(self) -> bool:
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            return False
+        return isinstance(focused, Input) and not focused.disabled
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "pause" and self._text_input_active():
+            return False
+        return True
+
+    def on_key(self, event: Key) -> None:
+        if event.key != "space" and event.character != " ":
+            return
+        if self._text_input_active():
+            return
+        event.prevent_default()
+        event.stop()
+        self.action_pause()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -255,14 +285,17 @@ class RadioTuiApp(App[None]):
     def _list_panel(self, pane: Pane, title: str, items: list[dict[str, Any]]) -> Panel:
         lines: list[str] = []
         active = pane == self.active_pane
-        selected = self.cursors[pane]
+        selected = max(0, min(self.cursors[pane], len(items) - 1)) if items else 0
+        start = _scroll_start(len(items), selected)
+        visible_items = items[start : start + LIST_VISIBLE_ROWS]
 
         if pane == "search" and self._searching:
             lines.append("[yellow]⌕ Đang tìm YouTube...[/yellow]")
         elif not items:
             lines.append("[dim]∅ Trống[/dim]")
 
-        for index, item in enumerate(items[:8]):
+        for offset, item in enumerate(visible_items):
+            index = start + offset
             cursor = ">" if active and index == selected else " "
             if pane == "stations":
                 cat = CATEGORIES.get(item.get("category", ""), item.get("category", ""))
@@ -278,8 +311,8 @@ class RadioTuiApp(App[None]):
             style = "bold reverse" if active and index == selected else ""
             row = f"{cursor} {index + 1:02d}. {_clip(label, 54)}"
             lines.append(f"[{style}]{row}[/{style}]" if style else row)
-        if len(items) > 8:
-            lines.append(f"[dim]… +{len(items) - 8} mục nữa[/dim]")
+        if len(items) > LIST_VISIBLE_ROWS:
+            title = f"{title} · {start + 1}-{start + len(visible_items)}/{len(items)}"
 
         border = "cyan" if active else "blue"
         return Panel("\n".join(lines), title=title, border_style=border)

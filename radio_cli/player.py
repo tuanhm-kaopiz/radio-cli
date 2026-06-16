@@ -22,6 +22,7 @@ from radio_cli.config import (
     mpv_install_hint,
     mpv_ipc_server,
 )
+from radio_cli.player_settings import load_volume
 from radio_cli.ytdlp_util import YtdlpError, is_youtube_url, resolve_stream_url
 
 console = Console()
@@ -196,6 +197,7 @@ def _mpv_cmd(url: str, *, quiet: bool = True) -> list[str]:
     cmd = [
         mpv,
         "--no-video",
+        f"--volume={load_volume():.0f}",
         f"--input-ipc-server={mpv_ipc_server()}",
     ]
     if quiet:

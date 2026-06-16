@@ -6,6 +6,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -14,6 +15,7 @@ from rich.console import Console
 
 from radio_cli import history
 from radio_cli.config import (
+    IPC_PIPE_NAME,
     IPC_SOCKET,
     IS_WINDOWS,
     PID_FILE,
@@ -22,10 +24,13 @@ from radio_cli.config import (
     mpv_install_hint,
     mpv_ipc_server,
 )
+from radio_cli.player_settings import load_volume
 from radio_cli.ytdlp_util import YtdlpError, is_youtube_url, resolve_stream_url
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+_play_lock = threading.Lock()
 
 
 class PlayerError(Exception):
@@ -117,36 +122,7 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def get_running_pid() -> int | None:
-    if not PID_FILE.exists():
-        return None
-    try:
-        pid = int(PID_FILE.read_text(encoding="utf-8").strip())
-    except ValueError:
-        _clear_state()
-        return None
-    if _pid_alive(pid):
-        return pid
-    _clear_state()
-    return None
-
-
-def get_playback_state() -> PlaybackState | None:
-    pid = get_running_pid()
-    if pid is None:
-        return None
-    data = _read_state_file()
-    if not data:
-        return None
-    state = PlaybackState.from_dict(data)
-    state.pid = pid
-    return state
-
-
-def stop(background_only: bool = False) -> bool:
-    pid = get_running_pid()
-    if pid is None:
-        return False
+def _kill_pid(pid: int) -> None:
     try:
         if IS_WINDOWS:
             subprocess.run(
@@ -164,8 +140,117 @@ def stop(background_only: bool = False) -> bool:
                 os.kill(pid, signal.SIGKILL)
     except OSError:
         pass
+
+
+def _discover_mpv_pids() -> list[int]:
+    """Tìm mọi mpv do radio-cli khởi chạy (nhận diện qua IPC socket/pipe)."""
+    ipc = mpv_ipc_server()
+    pids: list[int] = []
+    try:
+        if IS_WINDOWS:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        f"Get-CimInstance Win32_Process -Filter \"Name='mpv.exe'\" | "
+                        f"Where-Object {{ $_.CommandLine -like '*{IPC_PIPE_NAME}*' }} | "
+                        "Select-Object -ExpandProperty ProcessId"
+                    ),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            raw = result.stdout
+        else:
+            result = subprocess.run(
+                ["pgrep", "-f", f"input-ipc-server={ipc}"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            raw = result.stdout
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                pids.append(int(line))
+            except ValueError:
+                continue
+    except OSError:
+        return []
+    return sorted(set(pids))
+
+
+def _sync_pid_file(pid: int) -> None:
+    ensure_dirs()
+    PID_FILE.write_text(str(pid), encoding="utf-8")
+
+
+def get_running_pid() -> int | None:
+    pid_from_file: int | None = None
+    if PID_FILE.exists():
+        try:
+            pid_from_file = int(PID_FILE.read_text(encoding="utf-8").strip())
+            if _pid_alive(pid_from_file):
+                return pid_from_file
+        except ValueError:
+            pass
+
+    discovered = _discover_mpv_pids()
+    if not discovered:
+        _clear_state()
+        return None
+
+    if len(discovered) > 1:
+        logger.warning("Nhiều mpv radio-cli đang chạy: %s", discovered)
+        primary = discovered[-1]
+        for extra in discovered[:-1]:
+            _kill_pid(extra)
+        discovered = [primary]
+
+    pid = discovered[-1]
+    if pid_from_file != pid:
+        _sync_pid_file(pid)
+    return pid
+
+
+def get_playback_state() -> PlaybackState | None:
+    pid = get_running_pid()
+    if pid is None:
+        return None
+    data = _read_state_file()
+    if not data:
+        return PlaybackState(
+            title="(đang phát)",
+            source="url",
+            url="",
+            pid=pid,
+        )
+    state = PlaybackState.from_dict(data)
+    state.pid = pid
+    return state
+
+
+def stop(background_only: bool = False) -> bool:
+    pids: set[int] = set(_discover_mpv_pids())
+    if PID_FILE.exists():
+        try:
+            pids.add(int(PID_FILE.read_text(encoding="utf-8").strip()))
+        except ValueError:
+            pass
+
+    stopped = False
+    for pid in sorted(pids):
+        if _pid_alive(pid):
+            _kill_pid(pid)
+            stopped = True
+
     _clear_state()
-    return True
+    return stopped
 
 
 def _prepare_ipc_endpoint() -> None:
@@ -196,6 +281,8 @@ def _mpv_cmd(url: str, *, quiet: bool = True) -> list[str]:
     cmd = [
         mpv,
         "--no-video",
+        "--keep-open=no",
+        f"--volume={load_volume():.0f}",
         f"--input-ipc-server={mpv_ipc_server()}",
     ]
     if quiet:
@@ -215,6 +302,28 @@ def play(
     fallback_urls: list[str] | None = None,
 ) -> None:
     """Phát audio. Foreground chặn terminal; background detach process."""
+    with _play_lock:
+        _play_locked(
+            url,
+            title=title,
+            source=source,
+            station_id=station_id,
+            background=background,
+            quiet=quiet,
+            fallback_urls=fallback_urls,
+        )
+
+
+def _play_locked(
+    url: str,
+    *,
+    title: str,
+    source: str = "url",
+    station_id: str | None = None,
+    background: bool = False,
+    quiet: bool = True,
+    fallback_urls: list[str] | None = None,
+) -> None:
     stop()
 
     candidate_urls = [url]
@@ -284,7 +393,7 @@ def _play_candidate(
         if proc.poll() is not None:
             raise PlayerError("mpv đã dừng ngay sau khi mở. Kiểm tra URL stream hoặc kết nối mạng.")
         state.pid = proc.pid
-        PID_FILE.write_text(str(proc.pid), encoding="utf-8")
+        _sync_pid_file(proc.pid)
         _write_state(state)
         history.add(title=title, url=original_url, source=source, station_id=station_id)
         if not quiet:
@@ -299,8 +408,8 @@ def _play_candidate(
     except OSError as exc:
         raise PlayerError(f"Không thể chạy mpv: {exc}") from exc
     state.pid = proc.pid
+    _sync_pid_file(proc.pid)
     _write_state(state)
-    PID_FILE.write_text(str(proc.pid), encoding="utf-8")
     history.add(title=title, url=original_url, source=source, station_id=station_id)
 
     try:

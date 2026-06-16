@@ -14,10 +14,23 @@
 #   radio playlist import "Nhạc làm việc" my_links.txt
 
 # --- Định dạng: Tên | URL ---
-Sơn Tùng M-TP - Chúng ta của tương lai | https://www.youtube.com/watch?v=abPmZCZZrFA
-Mỹ Tâm - Người hãy quên em đi | https://www.youtube.com/watch?v=LnHg4wbsB9g
-Đen Vâu - Lối nhỏ | https://www.youtube.com/watch?v=8UVNT4wvIGY
+Đen ft. MIN - Bài Này Chill Phết | https://www.youtube.com/watch?v=ddaEtFOsFeM
+Đen ft. Biên - Đi Về Nhà | https://www.youtube.com/watch?v=vTJdVE_gjI0
+Da LAB - Một Nhà | https://www.youtube.com/watch?v=g20t8mKnU-4
+Da LAB - Gác Lại Âu Lo | https://www.youtube.com/watch?v=BxypdKb6aZw
+Da LAB - Thanh Xuân | https://www.youtube.com/watch?v=HKtJ3y5Gt7g
+Ngọt - Cho Tôi Lang Thang | https://www.youtube.com/watch?v=5v3zvXK0rW0
+Ngọt - Em Dạo Này | https://www.youtube.com/watch?v=lQjX1R2r5fA
+Phương Ly - Mặt Trời Của Em | https://www.youtube.com/watch?v=4GuR_g75ufY
+JustaTee ft. Phương Ly - Thằng Điên | https://www.youtube.com/watch?v=GvL4nh0Qq4I
+Hoàng Dũng - Nàng Thơ | https://www.youtube.com/watch?v=lR5wM4qzR5M
+MONO - Waiting For You | https://www.youtube.com/watch?v=CHw1b_1LVBA
+AMEE x B Ray - Anh Nhà Ở Đâu Thế | https://www.youtube.com/watch?v=K0bLLM2VY8g
+Sơn Tùng M-TP - Có Chắc Yêu Là Đây | https://www.youtube.com/watch?v=6t-MjBazs3o
+Sơn Tùng M-TP - Nơi Này Có Anh | https://www.youtube.com/watch?v=FN7ALfpGxiI
+ERIK - Yêu Và Yêu | https://www.youtube.com/watch?v=KxwUy2S4n-Q
+
 
 # --- Định dạng: chỉ URL ---
-https://www.youtube.com/watch?v=kJQP7kiw5Fk
-https://youtu.be/jfKfPfyJRdk
+# https://www.youtube.com/watch?v=kJQP7kiw5Fk
+# https://youtu.be/jfKfPfyJRdk

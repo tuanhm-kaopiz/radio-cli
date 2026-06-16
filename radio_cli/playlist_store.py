@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import re
 import time
@@ -13,6 +14,7 @@ from radio_cli.ytdlp_util import is_youtube_url
 
 MAX_PLAYLISTS = 100
 MAX_ITEMS_PER_PLAYLIST = 1000
+_CSV_SKIP = object()
 
 
 class PlaylistError(ValueError):
@@ -78,6 +80,65 @@ def make_item(*, title: str, url: str) -> dict[str, Any]:
         "source": "youtube" if is_youtube_url(url) else "url",
         "added_at": time.time(),
     }
+
+
+def _csv_fields(raw: str) -> list[str] | None:
+    for delimiter in (",", ";", "\t"):
+        if delimiter not in raw:
+            continue
+        try:
+            fields = next(csv.reader([raw], delimiter=delimiter, skipinitialspace=True))
+        except csv.Error:
+            continue
+        fields = [field.strip().lstrip("\ufeff") for field in fields]
+        if len(fields) > 1:
+            return fields
+    return None
+
+
+def _looks_like_csv_header(fields: list[str]) -> bool:
+    normalized = {field.strip().lower().replace(" ", "_") for field in fields}
+    return bool(normalized & {"url", "link", "links", "youtube_url", "video_url"}) and not any(
+        _valid_url_field(field) for field in fields
+    )
+
+
+def _valid_url_field(field: str) -> str | None:
+    try:
+        return validate_http_url(field, field_name="Playlist URL")
+    except UrlValidationError:
+        return None
+
+
+def _looks_like_row_number(value: str) -> bool:
+    stripped = value.strip()
+    return stripped.isdigit() or bool(re.fullmatch(r"\d+[.)]", stripped))
+
+
+def _title_from_csv_fields(fields: list[str], url_index: int, url: str) -> str:
+    before = [field for field in fields[:url_index] if field]
+    after = [field for field in fields[url_index + 1 :] if field]
+    meaningful_before = [field for field in before if not _looks_like_row_number(field)]
+    if meaningful_before:
+        return ", ".join(meaningful_before)
+    if after:
+        return after[0]
+    if before:
+        return before[-1]
+    return url
+
+
+def _parse_csv_import_line(raw: str) -> dict[str, Any] | object | None:
+    fields = _csv_fields(raw)
+    if fields is None:
+        return None
+    if _looks_like_csv_header(fields):
+        return _CSV_SKIP
+    for index, field in enumerate(fields):
+        url = _valid_url_field(field)
+        if url:
+            return make_item(title=_title_from_csv_fields(fields, index, url), url=url)
+    raise UrlValidationError("CSV import cần có một cột URL http/https hợp lệ.")
 
 
 def create(name: str) -> dict[str, Any]:
@@ -153,13 +214,23 @@ def add_item(name_or_id: str, item: dict[str, Any], *, create_missing: bool = Fa
 
 
 def parse_import_line(line: str) -> dict[str, Any] | None:
-    raw = line.strip()
+    raw = line.strip().lstrip("\ufeff")
     if not raw or raw.startswith("#"):
         return None
-    if "|" in raw:
-        title, url = raw.split("|", 1)
-        return make_item(title=title.strip(), url=url.strip())
-    url = validate_http_url(raw, field_name="Playlist URL")
+    try:
+        url = validate_http_url(raw, field_name="Playlist URL")
+    except UrlValidationError:
+        csv_item = _parse_csv_import_line(raw)
+        if csv_item is _CSV_SKIP:
+            return None
+        if csv_item is not None:
+            if not isinstance(csv_item, dict):
+                raise
+            return csv_item
+        if "|" in raw:
+            title, url = raw.split("|", 1)
+            return make_item(title=title.strip(), url=url.strip())
+        raise
     return make_item(title=url, url=url)
 
 

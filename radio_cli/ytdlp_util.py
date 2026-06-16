@@ -1,19 +1,14 @@
 from __future__ import annotations
 
-import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from rich.console import Console
 
 console = Console()
-
-YOUTUBE_RE = re.compile(
-    r"(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/)",
-    re.I,
-)
 
 # Format ưu tiên audio-only, fallback linh hoạt.
 AUDIO_FORMAT = "bestaudio[ext=m4a]/bestaudio/best"
@@ -24,7 +19,18 @@ class YtdlpError(Exception):
 
 
 def is_youtube_url(url: str) -> bool:
-    return bool(YOUTUBE_RE.search(url))
+    parsed = urlparse(url.strip())
+    host = (parsed.netloc or parsed.path.split("/", 1)[0]).lower()
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    return (
+        host == "youtu.be"
+        or host.endswith(".youtu.be")
+        or host == "youtube.com"
+        or host.endswith(".youtube.com")
+        or host == "youtube-nocookie.com"
+        or host.endswith(".youtube-nocookie.com")
+    )
 
 
 def _ytdlp_argv(*, quiet: bool = False) -> list[str]:

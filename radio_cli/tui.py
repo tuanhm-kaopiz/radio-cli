@@ -5,12 +5,13 @@ from typing import Any, Literal
 
 from rich.panel import Panel
 from rich.text import Text
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.events import Key
 from textual.widgets import Header, Input, Static
 
-from radio_cli import history, player, playlist_store, queue_store, search as search_module, stations
+from radio_cli import autoplay, history, player, playlist_store, queue_store, search as search_module, stations
 from radio_cli.search import SearchError
 from radio_cli.ytdlp_util import is_youtube_url
 from radio_cli.config import CATEGORIES
@@ -18,6 +19,14 @@ from radio_cli.mpv_ipc import MpvIpcError, adjust_volume, get_property, get_volu
 
 Pane = Literal["stations", "search", "queue", "playlists", "history"]
 PANES: list[Pane] = ["stations", "search", "queue", "playlists", "history"]
+LIST_VISIBLE_ROWS = 7
+PANE_WIDGET_IDS: dict[Pane, str] = {
+    "stations": "#stations",
+    "search": "#search",
+    "queue": "#queue",
+    "playlists": "#playlists",
+    "history": "#history",
+}
 PANE_TITLES: dict[Pane, str] = {
     "stations": "◆ Stations",
     "search": "⌕ YouTube Search",
@@ -62,6 +71,13 @@ def _progress_bar(position: float | None, duration: float | None, *, width: int 
     return "━" * filled + "─" * (width - filled)
 
 
+def _scroll_start(total: int, selected: int, visible_rows: int = LIST_VISIBLE_ROWS) -> int:
+    if total <= visible_rows:
+        return 0
+    selected = max(0, min(selected, total - 1))
+    return min(max(0, selected - visible_rows + 1), total - visible_rows)
+
+
 class RadioTuiApp(App[None]):
     """Fullscreen terminal player for radio-cli."""
 
@@ -72,6 +88,8 @@ class RadioTuiApp(App[None]):
         Binding("shift+tab,h", "previous_pane", "Pane ←"),
         Binding("up,k", "cursor_up", "Up"),
         Binding("down,j", "cursor_down", "Down"),
+        Binding("shift+up,K", "playlist_up", "Playlist ↑"),
+        Binding("shift+down,J", "playlist_down", "Playlist ↓"),
         Binding("enter", "play_selected", "Play"),
         Binding("/", "focus_search", "Search"),
         Binding("escape", "blur_search", "Cancel search"),
@@ -84,7 +102,7 @@ class RadioTuiApp(App[None]):
         Binding("]", "seek_forward", "Seek +10s"),
         Binding("0", "restart_track", "Restart"),
         Binding("m", "mute", "Mute"),
-        Binding("space", "pause", "Pause"),
+        Binding("space", "pause", "Pause", priority=True),
         Binding("s", "stop", "Stop"),
         Binding("+", "volume_up", "Vol+"),
         Binding("-", "volume_down", "Vol-"),
@@ -143,10 +161,34 @@ class RadioTuiApp(App[None]):
         self.search_results: list[dict[str, Any]] = []
         self._searching = False
         self._message = "Sẵn sàng. Nhấn / để search YouTube."
-        self._last_seen_pid: int | None = None
-        self._stop_requested = False
+        self._autoplay = autoplay.AutoplayState()
         self._target_playlist_id: str | None = None
         self._renaming_playlist_id: str | None = None
+        self._playlist_track_cursor = 0
+        self._playlist_preview_mode = False
+        self._playback_busy = False
+        self._playback_guard = threading.Lock()
+
+    def _text_input_active(self) -> bool:
+        try:
+            focused = self.focused
+        except ScreenStackError:
+            return False
+        return isinstance(focused, Input) and not focused.disabled
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "pause" and self._text_input_active():
+            return False
+        return True
+
+    def on_key(self, event: Key) -> None:
+        if event.key != "space" and event.character != " ":
+            return
+        if self._text_input_active():
+            return
+        event.prevent_default()
+        event.stop()
+        self.action_pause()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -170,17 +212,55 @@ class RadioTuiApp(App[None]):
         self.set_interval(2.0, self.refresh_ui)
         self.refresh_ui()
 
+    def _browse_tracks(self) -> list[dict[str, Any]]:
+        if not self._target_playlist_id:
+            return []
+        loaded = playlist_store.get(self._target_playlist_id)
+        if loaded is None:
+            return []
+        return list(loaded.get("items", []))
+
+    def _is_playlist_preview(self) -> bool:
+        return self._playlist_preview_mode and self._target_playlist_id is not None
+
+    def _selected_playlist_tracks(self) -> list[dict[str, Any]]:
+        if self._target_playlist_id:
+            return self._browse_tracks()
+        playlist = self._selected_item("playlists")
+        if playlist is None:
+            return []
+        loaded = playlist_store.get(playlist.get("id", "")) or playlist
+        return list(loaded.get("items", []))
+
+    def _list_visible_rows(self, pane: Pane) -> int:
+        if not self.is_mounted:
+            return LIST_VISIBLE_ROWS
+        try:
+            widget = self.query_one(PANE_WIDGET_IDS[pane], Static)
+            height = widget.content_size.height
+            if height <= 0:
+                return LIST_VISIBLE_ROWS
+            return max(3, height - 3)
+        except Exception:
+            return LIST_VISIBLE_ROWS
+
+    def _list_cursor_index(self, pane: Pane, items: list[dict[str, Any]]) -> int:
+        if not items:
+            return 0
+        if pane == "queue" and self._is_playlist_preview():
+            index = self._playlist_track_cursor
+        else:
+            index = self.cursors[pane]
+        return max(0, min(index, len(items) - 1))
+
     def _items_for_pane(self, pane: Pane) -> list[dict[str, Any]]:
         if pane == "stations":
             return stations.load_stations()
         if pane == "search":
             return self.search_results
         if pane == "queue":
-            if self.active_pane == "playlists":
-                playlist = self._selected_item("playlists")
-                if playlist is not None:
-                    loaded = playlist_store.get(playlist.get("id", "")) or playlist
-                    return list(loaded.get("items", []))
+            if self._is_playlist_preview():
+                return self._browse_tracks()
             return queue_store.list_items()
         if pane == "playlists":
             return playlist_store.list_playlists()
@@ -246,23 +326,37 @@ class RadioTuiApp(App[None]):
 
     def _shortcut_panel(self) -> Panel:
         body = (
-            "[bold]Điều hướng[/bold]: Tab/l phải  |  Shift+Tab/h trái  |  ↑/↓ hoặc k/j di chuyển  |  / search  |  Esc hủy search\n"
+            "[bold]Điều hướng[/bold]: Tab/l phải  |  Shift+Tab/h trái  |  ↑/↓ hoặc k/j di chuyển  |  "
+            "Playlists: Shift+↑/↓ đổi playlist  |  ↑/↓ chọn bài trong playlist  |  / search  |  Esc hủy search\n"
             "[bold]Player[/bold]: Enter phát nền  |  Space pause/resume  |  n next  |  seek -10/+10  |  0 replay  |  m mute\n"
             "[bold]Queue/Playlist[/bold]: a thêm queue  |  p lưu vào playlist đang chọn  |  e đổi tên playlist  |  d/x/Delete xóa queue/history/playlist  |  [bold]Khác[/bold]: r refresh  |  q thoát"
         )
         return Panel(body, title="⌘ Shortcuts", border_style="magenta")
 
-    def _list_panel(self, pane: Pane, title: str, items: list[dict[str, Any]]) -> Panel:
+    def _list_panel(
+        self,
+        pane: Pane,
+        title: str,
+        items: list[dict[str, Any]],
+        *,
+        visible_rows: int | None = None,
+    ) -> Panel:
         lines: list[str] = []
-        active = pane == self.active_pane
-        selected = self.cursors[pane]
+        rows = visible_rows if visible_rows is not None else self._list_visible_rows(pane)
+        active = pane == self.active_pane or (
+            pane == "queue" and self._is_playlist_preview() and self.active_pane in ("playlists", "queue")
+        )
+        selected = self._list_cursor_index(pane, items) if items else 0
+        start = _scroll_start(len(items), selected, visible_rows=rows)
+        visible_items = items[start : start + rows]
 
         if pane == "search" and self._searching:
             lines.append("[yellow]⌕ Đang tìm YouTube...[/yellow]")
         elif not items:
             lines.append("[dim]∅ Trống[/dim]")
 
-        for index, item in enumerate(items[:8]):
+        for offset, item in enumerate(visible_items):
+            index = start + offset
             cursor = ">" if active and index == selected else " "
             if pane == "stations":
                 cat = CATEGORIES.get(item.get("category", ""), item.get("category", ""))
@@ -278,27 +372,18 @@ class RadioTuiApp(App[None]):
             style = "bold reverse" if active and index == selected else ""
             row = f"{cursor} {index + 1:02d}. {_clip(label, 54)}"
             lines.append(f"[{style}]{row}[/{style}]" if style else row)
-        if len(items) > 8:
-            lines.append(f"[dim]… +{len(items) - 8} mục nữa[/dim]")
+        if len(items) > rows:
+            title = f"{title} · {start + 1}-{start + len(visible_items)}/{len(items)}"
 
         border = "cyan" if active else "blue"
         return Panel("\n".join(lines), title=title, border_style=border)
 
     def _maybe_autoplay_next(self) -> None:
-        state = player.get_playback_state()
-        if state is not None:
-            self._last_seen_pid = state.pid
-            self._stop_requested = False
-            return
-        if self._last_seen_pid is None or self._stop_requested:
-            return
-
-        self._last_seen_pid = None
-        next_item = queue_store.pop_next()
-        if next_item is None:
-            self._set_message("Bài đã kết thúc. Queue trống.")
-            return
-        self._play_item(next_item, subtitle="Autoplay")
+        autoplay.maybe_advance_queue(
+            self._autoplay,
+            on_play=self._play_item,
+            on_message=self._set_message,
+        )
 
     def refresh_ui(self) -> None:
         self._maybe_autoplay_next()
@@ -311,8 +396,8 @@ class RadioTuiApp(App[None]):
         )
         queue_items = self._items_for_pane("queue")
         queue_title = PANE_TITLES["queue"]
-        if self.active_pane == "playlists":
-            playlist = self._selected_item("playlists")
+        if self._is_playlist_preview():
+            playlist = playlist_store.get(self._target_playlist_id or "")
             if playlist is not None:
                 queue_title = f"▤ {playlist.get('name', '—')} · {len(queue_items)} bài"
         self.query_one("#queue", Static).update(self._list_panel("queue", queue_title, queue_items))
@@ -325,34 +410,93 @@ class RadioTuiApp(App[None]):
         self.query_one("#message", Static).update(Panel(self._message, title="● Status", border_style="yellow"))
         self.query_one("#shortcuts", Static).update(self._shortcut_panel())
 
+    def _set_active_pane(self, pane: Pane) -> None:
+        self.active_pane = pane
+        if pane == "playlists":
+            self._playlist_preview_mode = True
+            self._sync_target_playlist()
+        elif pane == "queue" and self._target_playlist_id:
+            self._playlist_preview_mode = True
+        elif pane not in ("playlists", "queue"):
+            self._playlist_preview_mode = False
+
     def action_next_pane(self) -> None:
-        self.active_pane = PANES[(PANES.index(self.active_pane) + 1) % len(PANES)]
-        self._sync_target_playlist()
+        next_pane = PANES[(PANES.index(self.active_pane) + 1) % len(PANES)]
+        self._set_active_pane(next_pane)
         self.refresh_ui()
 
     def action_previous_pane(self) -> None:
-        self.active_pane = PANES[(PANES.index(self.active_pane) - 1) % len(PANES)]
-        self._sync_target_playlist()
+        previous_pane = PANES[(PANES.index(self.active_pane) - 1) % len(PANES)]
+        self._set_active_pane(previous_pane)
         self.refresh_ui()
 
+    def _move_playlist_track_cursor(self, delta: int) -> None:
+        tracks = self._selected_playlist_tracks()
+        if not tracks:
+            return
+        self._playlist_track_cursor = max(0, min(len(tracks) - 1, self._playlist_track_cursor + delta))
+
     def action_cursor_up(self) -> None:
+        if self._is_playlist_preview() and self.active_pane in ("playlists", "queue"):
+            self._move_playlist_track_cursor(-1)
+            self.refresh_ui()
+            return
+        if self.active_pane == "playlists":
+            self._move_playlist_track_cursor(-1)
+            self.refresh_ui()
+            return
         self.cursors[self.active_pane] = max(0, self.cursors[self.active_pane] - 1)
         self._sync_target_playlist()
         self.refresh_ui()
 
     def action_cursor_down(self) -> None:
+        if self._is_playlist_preview() and self.active_pane in ("playlists", "queue"):
+            self._move_playlist_track_cursor(1)
+            self.refresh_ui()
+            return
+        if self.active_pane == "playlists":
+            self._move_playlist_track_cursor(1)
+            self.refresh_ui()
+            return
         count = len(self._items_for_pane(self.active_pane))
         if count:
             self.cursors[self.active_pane] = min(count - 1, self.cursors[self.active_pane] + 1)
         self._sync_target_playlist()
         self.refresh_ui()
 
-    def _sync_target_playlist(self) -> None:
+    def action_playlist_up(self) -> None:
         if self.active_pane != "playlists":
             return
-        playlist = self._selected_item("playlists")
-        if playlist is not None:
-            self._target_playlist_id = str(playlist.get("id", "")) or None
+        previous = self.cursors["playlists"]
+        self.cursors["playlists"] = max(0, self.cursors["playlists"] - 1)
+        if self.cursors["playlists"] != previous:
+            self._playlist_track_cursor = 0
+        self._sync_target_playlist()
+        self.refresh_ui()
+
+    def action_playlist_down(self) -> None:
+        if self.active_pane != "playlists":
+            return
+        previous = self.cursors["playlists"]
+        count = len(self._items_for_pane("playlists"))
+        if count:
+            self.cursors["playlists"] = min(count - 1, self.cursors["playlists"] + 1)
+        if self.cursors["playlists"] != previous:
+            self._playlist_track_cursor = 0
+        self._sync_target_playlist()
+        self.refresh_ui()
+
+    def _sync_target_playlist(self) -> None:
+        if self.active_pane == "playlists":
+            playlist = self._selected_item("playlists")
+            if playlist is not None:
+                self._target_playlist_id = str(playlist.get("id", "")) or None
+                self._playlist_preview_mode = True
+        tracks = self._browse_tracks() if self._target_playlist_id else self._selected_playlist_tracks()
+        if tracks:
+            self._playlist_track_cursor = max(0, min(self._playlist_track_cursor, len(tracks) - 1))
+        elif self.active_pane == "playlists":
+            self._playlist_track_cursor = 0
 
     def action_focus_search(self) -> None:
         search_input = self.query_one("#search_input", Input)
@@ -454,7 +598,21 @@ class RadioTuiApp(App[None]):
         else:
             self._set_message(f"Không có kết quả cho: {query}")
 
+    def _begin_playback(self) -> bool:
+        with self._playback_guard:
+            if self._playback_busy:
+                return False
+            self._playback_busy = True
+            return True
+
+    def _end_playback(self) -> None:
+        with self._playback_guard:
+            self._playback_busy = False
+
     def _play_item(self, item: dict[str, Any], *, subtitle: str) -> None:
+        if not self._begin_playback():
+            self._set_message("Đang chuẩn bị/phát bài khác. Nhấn s để dừng rồi thử lại.")
+            return
         url = item.get("url", "")
         if is_youtube_url(url):
             self._set_message(f"Đang lấy stream YouTube: {_clip(item.get('title', '—'), 50)}")
@@ -470,6 +628,8 @@ class RadioTuiApp(App[None]):
             detail = str(exc) if str(exc) else "Không phát được mục này."
             self._set_message(f"Lỗi phát: {detail}")
             return
+        finally:
+            self._end_playback()
         self._on_playback_started(subtitle, title)
 
     def _play_item_worker(self, item: dict[str, Any], subtitle: str) -> None:
@@ -479,6 +639,8 @@ class RadioTuiApp(App[None]):
             detail = str(exc) if str(exc) else "Không phát được mục này."
             self.call_from_thread(self._set_message, f"Lỗi phát: {detail}")
             return
+        finally:
+            self.call_from_thread(self._end_playback)
         self.call_from_thread(self._on_playback_started, subtitle, title)
 
     def _start_playback(self, item: dict[str, Any]) -> str:
@@ -505,10 +667,16 @@ class RadioTuiApp(App[None]):
         return item["title"]
 
     def _on_playback_started(self, subtitle: str, title: str) -> None:
-        self._stop_requested = False
+        autoplay.notify_playback_started(self._autoplay)
         self._set_message(f"{subtitle}: {title}")
 
-    def _play_playlist(self, playlist: dict[str, Any], *, shuffle_items: bool = False) -> None:
+    def _play_playlist(
+        self,
+        playlist: dict[str, Any],
+        *,
+        shuffle_items: bool = False,
+        start_index: int = 0,
+    ) -> None:
         loaded = playlist_store.get(playlist.get("id", "")) or playlist
         items = list(loaded.get("items", []))
         if not items:
@@ -518,12 +686,34 @@ class RadioTuiApp(App[None]):
             import random
 
             random.shuffle(items)
-        for item in items[1:]:
-            queue_store.add_item(
-                queue_store.make_item(title=item["title"], url=item["url"], source=item.get("source", "url")),
-                allow_duplicate=False,
-            )
-        self._play_item(items[0], subtitle=f"Playlist · {loaded.get('name', '—')}")
+        start_index = max(0, min(start_index, len(items) - 1))
+        self._playlist_preview_mode = False
+        autoplay.notify_manual_stop(self._autoplay)
+        player.stop()
+        self._end_playback()
+        queue_store.clear()
+        remaining = [
+            queue_store.make_item(title=item["title"], url=item["url"], source=item.get("source", "url"))
+            for item in items[start_index + 1 :]
+        ]
+        if remaining:
+            queue_store.add_many(remaining, allow_duplicate=True)
+        track_no = start_index + 1
+        subtitle = f"Playlist · {loaded.get('name', '—')} · bài {track_no}/{len(items)}"
+        self._play_item(items[start_index], subtitle=subtitle)
+
+    def _play_browsed_playlist(self) -> None:
+        tracks = self._browse_tracks()
+        if not tracks:
+            self._set_message("Không có playlist để phát.")
+            return
+        playlist = playlist_store.get(self._target_playlist_id or "")
+        if playlist is None:
+            self._set_message("Playlist không còn tồn tại.")
+            return
+        start_index = self._list_cursor_index("queue", tracks)
+        self._playlist_track_cursor = start_index
+        self._play_playlist(playlist, start_index=start_index)
 
     def _selected_playlist_item(self) -> dict[str, Any] | None:
         if self.active_pane == "stations":
@@ -555,6 +745,9 @@ class RadioTuiApp(App[None]):
             return
 
         if self.active_pane == "queue":
+            if self._is_playlist_preview():
+                self._play_browsed_playlist()
+                return
             index = self.cursors["queue"] + 1
             queue_item = queue_store.remove(index)
             if queue_item is None:
@@ -564,7 +757,9 @@ class RadioTuiApp(App[None]):
             return
 
         if self.active_pane == "playlists":
-            self._play_playlist(item)
+            if not self._target_playlist_id:
+                self._sync_target_playlist()
+            self._play_browsed_playlist()
             return
 
         self._play_item(item, subtitle="Đang phát")
@@ -594,7 +789,7 @@ class RadioTuiApp(App[None]):
 
     def action_add_to_playlist(self) -> None:
         if self.active_pane == "playlists":
-            self._set_message("Chọn station/search/queue/history rồi nhấn p để lưu vào playlist đang chọn. Enter để phát playlist.")
+            self._set_message("Chọn station/search/queue/history rồi nhấn p để lưu vào playlist đang chọn. ↑/↓ chọn bài, Enter phát từ bài đang chọn.")
             return
 
         item = self._selected_playlist_item()
@@ -704,8 +899,8 @@ class RadioTuiApp(App[None]):
         self._set_message("Đã tạm dừng." if paused else "Đang phát tiếp.")
 
     def action_stop(self) -> None:
-        self._stop_requested = True
-        self._last_seen_pid = None
+        autoplay.notify_manual_stop(self._autoplay)
+        self._end_playback()
         if player.stop():
             self._set_message("Đã dừng player.")
         else:

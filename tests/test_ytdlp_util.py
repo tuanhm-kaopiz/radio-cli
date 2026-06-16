@@ -5,6 +5,27 @@ import pytest
 from radio_cli import ytdlp_util
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.youtube.com/watch?v=abc",
+        "https://youtu.be/abc",
+        "https://music.youtube.com/watch?v=abc",
+        "https://m.youtube.com/watch?v=abc",
+        "https://www.youtube.com/live/abc?si=share",
+        "https://www.youtube.com/embed/abc",
+        "www.youtube.com/watch?v=abc",
+    ],
+)
+def test_is_youtube_url_accepts_common_youtube_variants(url):
+    assert ytdlp_util.is_youtube_url(url) is True
+
+
+def test_is_youtube_url_rejects_non_youtube_hosts():
+    assert ytdlp_util.is_youtube_url("https://example.com/watch?v=abc") is False
+    assert ytdlp_util.is_youtube_url("https://notyoutube.com/watch?v=abc") is False
+
+
 def test_resolve_stream_url_non_youtube_is_unchanged():
     url = "https://example.com/track.mp3"
     assert ytdlp_util.resolve_stream_url(url, quiet=True) == url
@@ -24,6 +45,19 @@ def test_require_mpv_quiet_raises_without_console(monkeypatch):
 
     with pytest.raises(player.PlayerError, match="Không tìm thấy mpv"):
         player.require_mpv(quiet=True)
+
+
+def test_mpv_cmd_uses_saved_volume(monkeypatch):
+    from radio_cli import player
+
+    monkeypatch.setattr(player, "require_mpv", lambda quiet=True: "mpv")
+    monkeypatch.setattr(player, "_prepare_ipc_endpoint", lambda: None)
+    monkeypatch.setattr(player, "mpv_ipc_server", lambda: "/tmp/player.sock")
+    monkeypatch.setattr(player, "load_volume", lambda: 35.0)
+
+    cmd = player._mpv_cmd("https://example.com/a.mp3", quiet=True)
+
+    assert "--volume=35" in cmd
 
 
 def test_player_quiet_youtube_skips_console_status(monkeypatch):

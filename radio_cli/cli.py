@@ -12,7 +12,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-from radio_cli import audio_hub, data_io, display, favorites, history, player, playlist_store, premium, queue_store, search, stations
+from radio_cli import audio_hub, autoplay, data_io, display, favorites, history, player, playlist_store, premium, queue_store, search, stations
 from radio_cli.config import CATEGORIES
 from radio_cli.logging_config import setup_logging
 from radio_cli.station_validation import validate_stations_data
@@ -53,6 +53,8 @@ def _run_player_or_exit(*args: Any, **kwargs: Any) -> None:
     except PlayerError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
+    if kwargs.get("background"):
+        autoplay.notify_cli_playback_started()
 
 
 def _play_station(station: dict[str, Any], *, background: bool) -> None:
@@ -150,11 +152,12 @@ def _play_playlist_items(
         random.shuffle(items)
     if replace_queue:
         queue_store.clear()
-    for item in items[1:]:
-        queue_store.add_item(
-            queue_store.make_item(title=item["title"], url=item["url"], source=item.get("source", "url")),
-            allow_duplicate=False,
-        )
+    remaining = [
+        queue_store.make_item(title=item["title"], url=item["url"], source=item.get("source", "url"))
+        for item in items[1:]
+    ]
+    if remaining:
+        queue_store.add_many(remaining, allow_duplicate=True)
     first = items[0]
     display.show_playback_panel(first["title"], subtitle=f"Playlist · {playlist['name']}", background=background)
     _run_player_or_exit(
@@ -404,20 +407,16 @@ def import_data_cmd(
 @app.command("stop")
 def stop_cmd() -> None:
     """Dừng phát nhạc/radio đang chạy nền."""
+    autoplay.notify_cli_manual_stop()
     state = player.get_playback_state()
-    if state is None:
-        if player.stop():
-            console.print("[dim]Đã dừng.[/dim]")
-        else:
-            console.print("[yellow]Không có gì đang phát.[/yellow]")
-        return
-
-    title = state.title
+    title = state.title if state else None
     if player.stop():
-        console.print(f"[green]■[/green] Đã dừng: [bold]{title}[/bold]")
+        if title:
+            console.print(f"[green]■[/green] Đã dừng: [bold]{title}[/bold]")
+        else:
+            console.print("[green]■[/green] Đã dừng player.")
     else:
-        console.print("[yellow]Không thể dừng player.[/yellow]")
-        raise typer.Exit(1)
+        console.print("[yellow]Không có gì đang phát.[/yellow]")
 
 
 @app.command("status")

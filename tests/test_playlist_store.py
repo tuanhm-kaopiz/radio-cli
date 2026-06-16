@@ -58,6 +58,30 @@ def test_import_file_supports_title_pipe_url_and_skips_duplicates(monkeypatch, t
     assert [item["title"] for item in playlist["items"]] == ["Song A", "https://www.youtube.com/watch?v=def456"]
 
 
+def test_import_file_supports_csv_with_header_and_url_column(monkeypatch, tmp_path):
+    isolate_playlists(monkeypatch, tmp_path)
+    links = tmp_path / "links.csv"
+    links.write_text(
+        "\n".join(
+            [
+                "title,url",
+                "Song A,https://music.youtube.com/watch?v=abc123",
+                "1,Song B,https://www.youtube.com/live/def456?si=share",
+                '"https://m.youtube.com/watch?v=ghi789","Song C"',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    added, skipped = playlist_store.import_file("CSV Playlist", links, create_missing=True)
+    playlist = playlist_store.get("CSV Playlist")
+
+    assert (added, skipped) == (3, 0)
+    assert playlist is not None
+    assert [item["title"] for item in playlist["items"]] == ["Song A", "Song B", "Song C"]
+    assert [item["source"] for item in playlist["items"]] == ["youtube", "youtube", "youtube"]
+
+
 def test_rename_playlist_updates_name(monkeypatch, tmp_path):
     isolate_playlists(monkeypatch, tmp_path)
 

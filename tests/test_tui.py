@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from radio_cli import queue_store
-from radio_cli.tui import RadioTuiApp, _clip, _format_seconds, _progress_bar
+from radio_cli.tui import RadioTuiApp, _clip, _format_seconds, _progress_bar, _scroll_start
 
 
 def test_clip_short_text_is_unchanged():
@@ -18,6 +18,12 @@ def test_format_seconds_and_progress_bar():
     assert _format_seconds(3661) == "1:01:01"
     assert _progress_bar(5, 10, width=10) == "━━━━━─────"
     assert _progress_bar(None, None, width=4) == "────"
+
+
+def test_scroll_start_keeps_selected_item_visible():
+    assert _scroll_start(10, 0, visible_rows=7) == 0
+    assert _scroll_start(10, 6, visible_rows=7) == 0
+    assert _scroll_start(10, 9, visible_rows=7) == 3
 
 
 def test_tui_app_initial_state():
@@ -39,8 +45,55 @@ def test_shortcut_panel_contains_core_keys():
     assert "d/x/Delete" in body
     assert "p lưu vào playlist đang chọn" in body
     assert "e đổi tên playlist" in body
+    assert "Shift+↑/↓ đổi playlist" in body
+    assert "↑/↓ chọn bài trong playlist" in body
     assert "Space" in body
     assert "q" in body
+
+
+def test_space_pause_binding_has_priority():
+    binding = next(binding for binding in RadioTuiApp.BINDINGS if binding.key == "space")
+
+    assert binding.action == "pause"
+    assert binding.priority is True
+
+
+def test_space_key_handler_triggers_pause(monkeypatch):
+    app = RadioTuiApp()
+    calls = []
+    monkeypatch.setattr(app, "action_pause", lambda: calls.append("pause"))
+
+    class FakeKey:
+        key = "space"
+        character = " "
+
+        def prevent_default(self):
+            calls.append("prevent")
+
+        def stop(self):
+            calls.append("stop")
+
+    app.on_key(FakeKey())
+
+    assert calls == ["prevent", "stop", "pause"]
+
+
+def test_list_panel_scrolls_to_selected_queue_item():
+    app = RadioTuiApp()
+    app.active_pane = "queue"
+    app.cursors["queue"] = 9
+    items = [
+        {"title": f"Song {index}", "url": f"https://example.com/{index}", "source": "url"}
+        for index in range(1, 11)
+    ]
+
+    panel = app._list_panel("queue", "Queue", items, visible_rows=7)
+    body = str(panel.renderable)
+
+    assert "04. ↗ Song 4" in body
+    assert "10. ↗ Song 10" in body
+    assert "01. ↗ Song 1" not in body
+    assert "4-10/10" in str(panel.title)
 
 
 def test_panel_navigation_actions(monkeypatch):
@@ -265,13 +318,12 @@ def test_play_queue_item_uses_quiet_background(monkeypatch):
 
 def test_autoplay_next_uses_queue_when_track_ends(monkeypatch):
     app = RadioTuiApp()
-    app._last_seen_pid = 123
-    app._stop_requested = False
+    app._autoplay.last_seen_pid = 123
     played = []
 
-    monkeypatch.setattr("radio_cli.tui.player.get_playback_state", lambda: None)
+    monkeypatch.setattr("radio_cli.autoplay.player.get_playback_state", lambda: None)
     monkeypatch.setattr(
-        "radio_cli.tui.queue_store.pop_next",
+        "radio_cli.autoplay.queue_store.pop_next",
         lambda: {"title": "Next Song", "url": "https://youtube.com/watch?v=2", "source": "search"},
     )
 
@@ -283,7 +335,7 @@ def test_autoplay_next_uses_queue_when_track_ends(monkeypatch):
     app._maybe_autoplay_next()
 
     assert played == [("Next Song", "Autoplay")]
-    assert app._last_seen_pid is None
+    assert app._autoplay.last_seen_pid is None
 
 
 def test_play_playlist_queues_remaining_items(monkeypatch):
@@ -302,15 +354,128 @@ def test_play_playlist_queues_remaining_items(monkeypatch):
 
     monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
     monkeypatch.setattr("radio_cli.tui.playlist_store.get", lambda playlist_id: playlist)
-    monkeypatch.setattr("radio_cli.tui.queue_store.add_item", lambda item, allow_duplicate=False: queued.append(item) or len(queued))
+    monkeypatch.setattr("radio_cli.tui.queue_store.clear", lambda: queued.clear())
+    monkeypatch.setattr("radio_cli.tui.player.stop", lambda: None)
+    monkeypatch.setattr(
+        "radio_cli.tui.queue_store.add_many",
+        lambda items, allow_duplicate=False: queued.extend(items) or len(queued),
+    )
     monkeypatch.setattr("radio_cli.tui.queue_store.make_item", lambda **kwargs: kwargs)
     monkeypatch.setattr(app, "_play_item", lambda item, subtitle: played.append((item, subtitle)))
     monkeypatch.setattr(app, "refresh_ui", lambda: None)
 
+    app._target_playlist_id = "demo"
+    app._playlist_preview_mode = True
     app.action_play_selected()
 
     assert queued == [{"title": "Two", "url": "https://example.com/2", "source": "url"}]
-    assert played == [(playlist["items"][0], "Playlist · Demo")]
+    assert played == [(playlist["items"][0], "Playlist · Demo · bài 1/2")]
+
+
+def test_play_playlist_starts_at_selected_track(monkeypatch):
+    app = RadioTuiApp()
+    app.active_pane = "playlists"
+    playlist = {
+        "id": "demo",
+        "name": "Demo",
+        "items": [
+            {"title": f"Song {index}", "url": f"https://example.com/{index}", "source": "url"}
+            for index in range(1, 12)
+        ],
+    }
+    queued = []
+    played = []
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
+    monkeypatch.setattr("radio_cli.tui.playlist_store.get", lambda playlist_id: playlist)
+    monkeypatch.setattr("radio_cli.tui.queue_store.clear", lambda: queued.clear())
+    monkeypatch.setattr("radio_cli.tui.player.stop", lambda: None)
+    monkeypatch.setattr(
+        "radio_cli.tui.queue_store.add_many",
+        lambda items, allow_duplicate=False: queued.extend(items) or len(queued),
+    )
+    monkeypatch.setattr("radio_cli.tui.queue_store.make_item", lambda **kwargs: kwargs)
+    monkeypatch.setattr(app, "_play_item", lambda item, subtitle: played.append((item, subtitle)))
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    app._target_playlist_id = "demo"
+    app._playlist_preview_mode = True
+    app._playlist_track_cursor = 9
+    app.action_play_selected()
+
+    assert played == [(playlist["items"][9], "Playlist · Demo · bài 10/11")]
+    assert [item["title"] for item in queued] == ["Song 11"]
+
+
+def test_playlist_down_does_not_reset_track_cursor_for_single_playlist(monkeypatch):
+    app = RadioTuiApp()
+    playlist = {"id": "demo", "name": "Demo", "items": [{"title": f"Song {i}", "url": f"https://example.com/{i}", "source": "url"} for i in range(1, 20)]}
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
+    monkeypatch.setattr("radio_cli.tui.playlist_store.get", lambda playlist_id: playlist)
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    app.active_pane = "playlists"
+    app._target_playlist_id = "demo"
+    app._playlist_preview_mode = True
+    app._playlist_track_cursor = 12
+
+    app.action_playlist_down()
+
+    assert app._playlist_track_cursor == 12
+
+
+def test_play_playlist_keeps_duplicate_urls_in_queue(monkeypatch):
+    app = RadioTuiApp()
+    app.active_pane = "playlists"
+    playlist = {
+        "id": "demo",
+        "name": "Demo",
+        "items": [
+            {"title": "First", "url": "https://example.com/shared", "source": "url"},
+            {"title": "Second", "url": "https://example.com/2", "source": "url"},
+            {"title": "Third", "url": "https://example.com/shared", "source": "url"},
+        ],
+    }
+    queued = []
+
+    monkeypatch.setattr("radio_cli.tui.playlist_store.list_playlists", lambda: [playlist])
+    monkeypatch.setattr("radio_cli.tui.playlist_store.get", lambda playlist_id: playlist)
+    monkeypatch.setattr("radio_cli.tui.queue_store.clear", lambda: queued.clear())
+    monkeypatch.setattr(
+        "radio_cli.tui.queue_store.add_many",
+        lambda items, allow_duplicate=False: queued.extend(items) or len(queued),
+    )
+    monkeypatch.setattr("radio_cli.tui.queue_store.make_item", lambda **kwargs: kwargs)
+    monkeypatch.setattr(app, "_play_item", lambda item, subtitle: None)
+    monkeypatch.setattr(app, "refresh_ui", lambda: None)
+
+    app.action_play_selected()
+
+    assert [item["title"] for item in queued] == ["Second", "Third"]
+
+
+def test_playlists_pane_scrolls_tracks_with_cursor_down():
+    app = RadioTuiApp()
+    playlist = {
+        "id": "demo",
+        "name": "Demo",
+        "items": [
+            {"title": f"Song {index}", "url": f"https://example.com/{index}", "source": "url"}
+            for index in range(1, 11)
+        ],
+    }
+    app.active_pane = "playlists"
+    app.cursors["playlists"] = 0
+    app._target_playlist_id = "demo"
+    app._playlist_preview_mode = True
+    app._playlist_track_cursor = 9
+
+    panel = app._list_panel("queue", "Queue", playlist["items"], visible_rows=7)
+    body = str(panel.renderable)
+
+    assert "10. ↗ Song 10" in body
+    assert "04. ↗ Song 4" in body
+    assert "01. ↗ Song 1" not in body
 
 
 def test_playlists_pane_previews_tracks_in_queue_panel(monkeypatch):
@@ -329,6 +494,8 @@ def test_playlists_pane_previews_tracks_in_queue_panel(monkeypatch):
     monkeypatch.setattr(app, "refresh_ui", lambda: None)
 
     app.active_pane = "playlists"
+    app._target_playlist_id = "demo"
+    app._playlist_preview_mode = True
     items = app._items_for_pane("queue")
 
     assert [item["title"] for item in items] == ["One", "Two"]
